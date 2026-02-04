@@ -8,6 +8,22 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      window.addEventListener('error', function(e) {
+        const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = 'position:fixed;top:0;left:0;width:100%;background:rgba(255,0,0,0.9);color:white;padding:20px;z-index:9999;font-family:monospace;white-space:pre-wrap;';
+        errorDiv.textContent = 'Global Error: ' + e.message + '\nLocation: ' + e.filename + ':' + e.lineno + ':' + e.colno + '\n' + (e.error ? e.error.stack : '');
+        document.body.appendChild(errorDiv);
+        console.error('Captured global error:', e);
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+         const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = 'position:fixed;top:50%;left:0;width:100%;background:rgba(255,0,0,0.9);color:white;padding:20px;z-index:9999;font-family:monospace;white-space:pre-wrap;';
+        errorDiv.textContent = 'Unhandled Promise Rejection: ' + (e.reason ? (e.reason.message || e.reason) : 'Unknown reason');
+        document.body.appendChild(errorDiv);
+        console.error('Captured unhandled rejection:', e);
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
