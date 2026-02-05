@@ -69,7 +69,7 @@ function DroppableDay({ id, children, isOverProp }: { id: string, children: Reac
 
 export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }: ScheduleEditorProps) {
     const [expandedClass, setExpandedClass] = React.useState<string | null>(null);
-    const [activeId, setActiveId] = React.useState<string | null>(null);
+
     const [activeSubjectName, setActiveSubjectName] = React.useState<string | null>(null);
 
     const toggleExpand = (className: string) => {
@@ -101,7 +101,7 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
     };
 
     const handleDragStart = (event: DragStartEvent) => {
-        setActiveId(event.active.id as string);
+
         // ID format: subject::{className}::{weekType}::{day}::{index}::{subjectName}
         // Actually, we can just pass the subject name in separate state or extract it from ID if we encode it.
         // Let's encode it at the end.
@@ -113,7 +113,7 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
 
     const handleDragEnd = (event: DragEndEvent) => {
         const { active, over } = event;
-        setActiveId(null);
+
         setActiveSubjectName(null);
 
         if (!over) return;

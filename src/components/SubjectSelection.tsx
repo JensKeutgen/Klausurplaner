@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useMemo } from 'react';
 import { BookOpen, CheckSquare, Square, ChevronUp, ChevronDown } from 'lucide-react';
 import type { ClassSchedule } from '../types';
 
