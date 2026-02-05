@@ -65,9 +65,7 @@ export function ExamCard({ exam, isOverlay, isValid = true, onTogglePin }: ExamC
                         )}
                     </div>
                 </div>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
-                    {exam.durationMinutes} min
-                </div>
+
             </div>
         </div>
     );

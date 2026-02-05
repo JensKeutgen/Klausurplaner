@@ -38,4 +38,5 @@ export interface AppState {
   exams: Exam[];
   blockedDays: BlockedDays;
   blockedClassDays: BlockedClassDays;
+  selectedSubjects: Record<string, string[]>;
 }

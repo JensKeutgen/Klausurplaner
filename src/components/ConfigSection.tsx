@@ -105,7 +105,7 @@ export function ConfigSection({ weeks, onUpdateWeeks }: ConfigSectionProps) {
         }
 
         return (
-            <div style={{ width: '300px' }}>
+            <div style={{ width: '260px' }}>
                 <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem', fontWeight: 600 }}>
                     {monthDate.toLocaleString('de-DE', { month: 'long', year: 'numeric' })}
                 </div>
@@ -136,7 +136,7 @@ export function ConfigSection({ weeks, onUpdateWeeks }: ConfigSectionProps) {
 
             {!isCollapsed && (
                 <>
-                    <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '2rem' }}>
+                    <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '2rem' }}>
                         <button onClick={(e) => { e.stopPropagation(); prevMonth(); }} style={{ background: 'none', border: 'none', color: 'var(--text-primary)' }}><ChevronLeft /></button>
                         {renderMonth(0)}
                         {renderMonth(1)}
