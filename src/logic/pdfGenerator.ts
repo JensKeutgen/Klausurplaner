@@ -62,7 +62,7 @@ export function generatePDF(state: AppState) {
 
     // Title
     doc.setFontSize(18);
-    doc.text('Klausurplanung 2025 - 1. Quartal', 14, 22);
+    doc.text(state.pdfSettings?.title || 'Klausurplanung 2025 - 1. Quartal', 14, 22);
 
     // Prepare Data
     // Columns: [ "Fach", ...Classes ]
@@ -138,16 +138,24 @@ export function generatePDF(state: AppState) {
         body.push(row);
     });
 
-    // Special Rows (Hardcoded placeholders for now as per screenshot layout)
+    // Special Rows
     // Nachschreibetermin
-    /*
-    const rowNach = ['Nachschreibtermin', ...classNames.map(() => '**')];
-    body.push(rowNach);
+    if (state.pdfSettings?.makeupExamInfo) {
+        const rowNach = [
+            { content: 'Nachschreibetermin', styles: { fontStyle: 'bold', halign: 'right' } },
+            ...classNames.map(() => ({ content: state.pdfSettings.makeupExamInfo, styles: { halign: 'center' } }))
+        ];
+        body.push(rowNach);
+    }
 
     // Quartalsnoten
-    const rowQuartal = ['Quartalsnoten', ...classNames.map(() => '27.10.')];
-    body.push(rowQuartal);
-    */
+    if (state.pdfSettings?.gradesDueDate) {
+        const rowQuartal = [
+            { content: 'Noten eintragen', styles: { fontStyle: 'bold', halign: 'right' } },
+            ...classNames.map(() => ({ content: state.pdfSettings.gradesDueDate, styles: { halign: 'center' } }))
+        ];
+        body.push(rowQuartal);
+    }
 
     // Generate Table
     autoTable(doc, {

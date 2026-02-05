@@ -35,7 +35,8 @@ export function getWeeksBetween(start: Date, end: Date): Week[] {
                 id: uuidv4(),
                 weekNumber: weekNum,
                 year: isoYear,
-                isBlocked: false
+                isBlocked: false,
+                weekType: 'A'
             });
         }
 

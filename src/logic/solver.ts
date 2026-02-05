@@ -4,10 +4,11 @@ import { type ClassSchedule, type DayOfWeek, DAYS_OF_WEEK, type Exam, type Week 
 export const MAX_EXAMS_PER_WEEK = 2;
 
 // Helper: Check if a subject is taught on a specific day
-export function isSubjectTaughtOnDay(schedule: ClassSchedule, subject: string, day: DayOfWeek): boolean {
-    const subjectsOnDay = schedule.subjects[day] || [];
-    // Loose matching to handle potential minor naming diffs if needed, or strict. 
-    // Going with strict includes check for now as LLM should be consistent.
+export function isSubjectTaughtOnDay(schedule: ClassSchedule, subject: string, day: DayOfWeek, weekType: 'A' | 'B' = 'A'): boolean {
+    const subjectsOnDay = (weekType === 'B' && schedule.subjectsB)
+        ? schedule.subjectsB[day] || []
+        : schedule.subjects[day] || [];
+
     return subjectsOnDay.includes(subject);
 }
 
@@ -22,6 +23,7 @@ export function validateMove(
     targetDay: DayOfWeek,
     allExams: Exam[],
     classSchedule: ClassSchedule,
+    weeks: Week[],
     blockedDays: Record<string, Record<DayOfWeek, boolean>>,
     blockedClassDays: Record<string, Record<string, Record<DayOfWeek, boolean>>> = {}
 ): { valid: boolean; reason?: string } {
@@ -36,8 +38,13 @@ export function validateMove(
     }
 
     // 2. Check if subject is taught on that day
-    if (!isSubjectTaughtOnDay(classSchedule, exam.subject, targetDay)) {
-        return { valid: false, reason: `${exam.subject} is not taught on ${targetDay}.` };
+    const targetWeek = weeks.find(w => w.id === targetWeekId);
+    if (!targetWeek) {
+        return { valid: false, reason: 'Target week not found (Internal Error).' };
+    }
+
+    if (!isSubjectTaughtOnDay(classSchedule, exam.subject, targetDay, targetWeek.weekType)) {
+        return { valid: false, reason: `${exam.subject} is not taught on ${targetDay} in Week ${targetWeek.weekType}.` };
     }
 
     // 3. Check max exams per week
@@ -82,8 +89,12 @@ export function distributeExams(
         // Filter by selection
         const allowedSubjects = selectedSubjects[cls.className] || [];
 
+        // Unique subjects might appear in Week A OR Week B. We need to collect from both.
+        const subjectsA = Object.values(cls.subjects).flat();
+        const subjectsB = cls.subjectsB ? Object.values(cls.subjectsB).flat() : [];
+
         const uniqueSubjects = Array.from(new Set(
-            Object.values(cls.subjects).flat()
+            [...subjectsA, ...subjectsB]
         )).filter(s => allowedSubjects.includes(s));
 
         for (const subject of uniqueSubjects) {
@@ -118,7 +129,7 @@ export function distributeExams(
                     if (blockedClassDays[cls.className]?.[week.id]?.[day]) continue;
 
                     // Check Subject Taught
-                    if (!isSubjectTaughtOnDay(cls, subject, day)) continue;
+                    if (!isSubjectTaughtOnDay(cls, subject, day, week.weekType)) continue;
 
                     // Check Max exams
                     const weekExams = exams.filter(e => e.className === cls.className && e.assignedWeekId === week.id);
@@ -192,7 +203,7 @@ export function autoFix(
                 if (blockedClassDays[exam.className]?.[week.id]?.[day]) continue;
 
                 // Check Subject Taught
-                if (!isSubjectTaughtOnDay(cls, exam.subject, day)) continue;
+                if (!isSubjectTaughtOnDay(cls, exam.subject, day, week.weekType)) continue;
 
                 // Check Max exams (considering ALREADY placed in newExams)
                 const currentWeekExams = newExams.filter(e => e.className === exam.className && e.assignedWeekId === week.id);

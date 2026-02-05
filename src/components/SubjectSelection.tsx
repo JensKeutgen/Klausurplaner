@@ -6,10 +6,11 @@ interface SubjectSelectionProps {
     classes: ClassSchedule[];
     selectedSubjects: Record<string, string[]>; // className -> subject[]
     onUpdateSelection: (selection: Record<string, string[]>) => void;
+    isCollapsed: boolean;
+    onToggle: () => void;
 }
 
-export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection }: SubjectSelectionProps) {
-    const [isCollapsed, setIsCollapsed] = useState(false);
+export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection, isCollapsed, onToggle }: SubjectSelectionProps) {
 
     // Extract all unique subjects per class
     const classSubjects = useMemo(() => {
@@ -63,7 +64,7 @@ export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection 
         <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem', background: 'var(--bg-card)', borderRadius: '8px', boxShadow: 'var(--shadow-md)' }}>
             <div
                 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isCollapsed ? 0 : '1rem', cursor: 'pointer' }}
-                onClick={() => setIsCollapsed(!isCollapsed)}
+                onClick={onToggle}
             >
                 <h2 style={{ fontSize: '1.25rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                     <BookOpen size={24} style={{ color: 'var(--accent-primary)' }} />

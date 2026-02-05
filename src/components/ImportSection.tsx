@@ -5,13 +5,14 @@ import type { ClassSchedule } from '../types';
 
 interface ImportSectionProps {
     onImport: (schedules: ClassSchedule[]) => void;
+    isCollapsed: boolean;
+    onToggle: () => void;
 }
 
-export function ImportSection({ onImport }: ImportSectionProps) {
+export function ImportSection({ onImport, isCollapsed, onToggle }: ImportSectionProps) {
     const [jsonText, setJsonText] = useState('');
     const [error, setError] = useState<string | null>(null);
     const [copied, setCopied] = useState(false);
-    const [isCollapsed, setIsCollapsed] = useState(false);
 
     const handleCopyPrompt = () => {
         navigator.clipboard.writeText(LLM_PROMPT);
@@ -54,7 +55,7 @@ export function ImportSection({ onImport }: ImportSectionProps) {
         <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem', background: 'var(--bg-card)', borderRadius: '8px', boxShadow: 'var(--shadow-md)', transition: 'all 0.3s' }}>
             <div
                 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isCollapsed ? 0 : '1rem', cursor: 'pointer' }}
-                onClick={() => setIsCollapsed(!isCollapsed)}
+                onClick={onToggle}
             >
                 <h2 style={{ fontSize: '1.25rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                     <FileJson size={24} className="text-accent" style={{ color: 'var(--accent-primary)' }} />

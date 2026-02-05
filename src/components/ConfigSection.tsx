@@ -1,19 +1,22 @@
 import { useState } from 'react';
-import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, AlertCircle, ChevronUp, ChevronDown } from 'lucide-react';
-import type { Week } from '../types';
+import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, AlertCircle, ChevronUp, ChevronDown, FileText } from 'lucide-react';
+import type { Week, PdfSettings } from '../types';
 import { getWeeksBetween, isSameDay, isDateInRange } from '../logic/dateUtils';
 
 interface ConfigSectionProps {
     weeks: Week[];
     onUpdateWeeks: (weeks: Week[]) => void;
+    pdfSettings: PdfSettings;
+    onUpdatePdfSettings: (settings: PdfSettings) => void;
+    isCollapsed: boolean;
+    onToggle: () => void;
 }
 
-export function ConfigSection({ weeks, onUpdateWeeks }: ConfigSectionProps) {
+export function ConfigSection({ weeks, onUpdateWeeks, pdfSettings, onUpdatePdfSettings, isCollapsed, onToggle }: ConfigSectionProps) {
     const [currentMonth, setCurrentMonth] = useState(new Date());
 
     const [selectionStart, setSelectionStart] = useState<Date | null>(null);
     const [selectionEnd, setSelectionEnd] = useState<Date | null>(null);
-    const [isCollapsed, setIsCollapsed] = useState(false);
 
     const handleDateClick = (date: Date) => {
         if (!selectionStart || (selectionStart && selectionEnd)) {
@@ -57,6 +60,10 @@ export function ConfigSection({ weeks, onUpdateWeeks }: ConfigSectionProps) {
 
     const toggleBlockWeek = (id: string) => {
         onUpdateWeeks(weeks.map(w => w.id === id ? { ...w, isBlocked: !w.isBlocked } : w));
+    };
+
+    const toggleWeekType = (id: string) => {
+        onUpdateWeeks(weeks.map(w => w.id === id ? { ...w, weekType: w.weekType === 'A' ? 'B' : 'A' } : w));
     };
 
     const renderMonth = (offset: number) => {
@@ -123,7 +130,7 @@ export function ConfigSection({ weeks, onUpdateWeeks }: ConfigSectionProps) {
         <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem', background: 'var(--bg-card)', borderRadius: '8px', boxShadow: 'var(--shadow-md)', transition: 'all 0.3s' }}>
             <div
                 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isCollapsed ? 0 : '1rem', cursor: 'pointer' }}
-                onClick={() => setIsCollapsed(!isCollapsed)}
+                onClick={onToggle}
             >
                 <h2 style={{ fontSize: '1.25rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                     <CalendarIcon size={24} style={{ color: 'var(--accent-primary)' }} />
@@ -143,36 +150,102 @@ export function ConfigSection({ weeks, onUpdateWeeks }: ConfigSectionProps) {
                         <button onClick={(e) => { e.stopPropagation(); nextMonth(); }} style={{ background: 'none', border: 'none', color: 'var(--text-primary)' }}><ChevronRight /></button>
                     </div>
 
-                    <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '1rem' }}>
-                        <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '0.5rem' }}>Ausgewählte Wochen</h3>
-                        {weeks.length === 0 ? (
-                            <p style={{ color: 'var(--text-secondary)' }}>Wähle ein Start- und Enddatum oben aus.</p>
-                        ) : (
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
-                                {weeks.map(week => (
-                                    <div
-                                        key={week.id}
-                                        style={{
-                                            padding: '0.5rem 1rem',
-                                            background: week.isBlocked ? 'var(--bg-app)' : 'var(--bg-panel)',
-                                            border: `1px solid ${week.isBlocked ? 'var(--accent-danger)' : 'var(--border-color)'}`,
-                                            borderRadius: '6px',
-                                            display: 'flex', alignItems: 'center', gap: '8px',
-                                            opacity: week.isBlocked ? 0.7 : 1
-                                        }}
-                                    >
-                                        <span style={{ fontWeight: 500 }}>KW {week.weekNumber}</span>
-                                        <button
-                                            onClick={(e) => { e.stopPropagation(); toggleBlockWeek(week.id); }}
-                                            title="Woche blockieren"
-                                            style={{ background: 'none', border: 'none', color: week.isBlocked ? 'var(--accent-danger)' : 'var(--text-secondary)', padding: '4px' }}
+                    <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(300px, 1fr) 260px', // Calendar takes available space, list fixed width
+                        gap: '2rem',
+                        alignItems: 'start',
+                        borderTop: '1px solid var(--border-color)',
+                        paddingTop: '1rem'
+                    }}>
+                        {/* Selected Weeks List */}
+                        <div>
+                            <h4 style={{ marginBottom: '1rem', color: 'var(--text-secondary)', textTransform: 'uppercase', fontSize: '0.85rem', letterSpacing: '0.5px', fontWeight: 600 }}>
+                                Ausgewählte Wochen
+                            </h4>
+                            {weeks.length === 0 ? (
+                                <p style={{ color: 'var(--text-secondary)' }}>Wähle ein Start- und Enddatum oben aus.</p>
+                            ) : (
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
+                                    {weeks.map(week => (
+                                        <div
+                                            key={week.id}
+                                            style={{
+                                                padding: '0.5rem 1rem',
+                                                background: week.isBlocked ? 'var(--bg-app)' : 'var(--bg-panel)',
+                                                border: `1px solid ${week.isBlocked ? 'var(--accent-danger)' : 'var(--border-color)'}`,
+                                                borderRadius: '6px',
+                                                display: 'flex', alignItems: 'center', gap: '8px',
+                                                opacity: week.isBlocked ? 0.7 : 1
+                                            }}
                                         >
-                                            <AlertCircle size={16} />
-                                        </button>
-                                    </div>
-                                ))}
+                                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}>
+                                                <span style={{ fontWeight: 500 }}>KW {week.weekNumber}</span>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); toggleWeekType(week.id); }}
+                                                    style={{
+                                                        fontSize: '0.7rem',
+                                                        padding: '1px 6px',
+                                                        borderRadius: '4px',
+                                                        background: week.weekType === 'A' ? 'var(--accent-primary)' : 'var(--accent-secondary)', // Assuming secondary exists or use another color
+                                                        color: 'white',
+                                                        border: 'none',
+                                                        cursor: 'pointer'
+                                                    }}
+                                                    title="Wochentyp umschalten (A/B)"
+                                                >
+                                                    {week.weekType}
+                                                </button>
+                                            </div>
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); toggleBlockWeek(week.id); }}
+                                                title="Woche blockieren"
+                                                style={{ background: 'none', border: 'none', color: week.isBlocked ? 'var(--accent-danger)' : 'var(--text-secondary)', padding: '4px' }}
+                                            >
+                                                <AlertCircle size={16} />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* PDF Settings */}
+                        <div>
+                            <h4 style={{ marginBottom: '1rem', color: 'var(--text-secondary)', textTransform: 'uppercase', fontSize: '0.85rem', letterSpacing: '0.5px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <FileText size={16} />
+                                PDF Einstellungen
+                            </h4>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.85rem', fontWeight: 500 }}>Titel</label>
+                                    <input
+                                        type="text"
+                                        value={pdfSettings.title}
+                                        onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, title: e.target.value })}
+                                        style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-app)', color: 'var(--text-primary)' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.85rem', fontWeight: 500 }}>Nachschreibetermin (Text)</label>
+                                    <input
+                                        type="text"
+                                        value={pdfSettings.makeupExamInfo}
+                                        onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, makeupExamInfo: e.target.value })}
+                                        style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-app)', color: 'var(--text-primary)' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.85rem', fontWeight: 500 }}>Noten eintragen (Datum)</label>
+                                    <input
+                                        type="text"
+                                        value={pdfSettings.gradesDueDate}
+                                        onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, gradesDueDate: e.target.value })}
+                                        style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-app)', color: 'var(--text-primary)' }}
+                                    />
+                                </div>
                             </div>
-                        )}
+                        </div>
                     </div>
                 </>
             )}

@@ -8,14 +8,14 @@ import { SubjectSelection } from './components/SubjectSelection';
 import { ScheduleEditor } from './components/ScheduleEditor';
 import { CalendarBoard } from './components/CalendarBoard';
 import { generatePDF } from './logic/pdfGenerator';
-import { Download, Sparkles, Upload, RotateCcw } from 'lucide-react';
+import { Download, Sparkles, Upload, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
 // Default initial weeks
 const INITIAL_WEEKS: Week[] = [
-  { id: uuidv4(), weekNumber: 45, year: 2024, isBlocked: false },
-  { id: uuidv4(), weekNumber: 46, year: 2024, isBlocked: false },
-  { id: uuidv4(), weekNumber: 47, year: 2024, isBlocked: false },
-  { id: uuidv4(), weekNumber: 48, year: 2024, isBlocked: false },
+  { id: uuidv4(), weekNumber: 45, year: 2024, isBlocked: false, weekType: 'A' },
+  { id: uuidv4(), weekNumber: 46, year: 2024, isBlocked: false, weekType: 'A' },
+  { id: uuidv4(), weekNumber: 47, year: 2024, isBlocked: false, weekType: 'A' },
+  { id: uuidv4(), weekNumber: 48, year: 2024, isBlocked: false, weekType: 'A' },
 ];
 
 const STORAGE_KEY = 'klausurplaner_v1';
@@ -46,13 +46,42 @@ function App() {
     const saved = localStorage.getItem(STORAGE_KEY);
     return saved ? JSON.parse(saved).selectedSubjects : {};
   });
+  const [pdfSettings, setPdfSettings] = useState<any>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved && JSON.parse(saved).pdfSettings ? JSON.parse(saved).pdfSettings : {
+      title: 'Klausurplanung 2025 – 1. Quartal',
+      makeupExamInfo: '**',
+      gradesDueDate: '27.10.'
+    };
+  });
 
-  const appState: AppState = { classes, weeks, exams, blockedDays, blockedClassDays, selectedSubjects };
+  // Collapse State
+  const [collapsed, setCollapsed] = useState({
+    import: false,
+    config: false,
+    schedule: false,
+    subjects: false
+  });
+
+  const toggleCollapse = (section: keyof typeof collapsed) => {
+    setCollapsed(prev => ({ ...prev, [section]: !prev[section] }));
+  };
+
+  const toggleAll = (shouldCollapse: boolean) => {
+    setCollapsed({
+      import: shouldCollapse,
+      config: shouldCollapse,
+      schedule: shouldCollapse,
+      subjects: shouldCollapse
+    });
+  };
+
+  const appState: AppState = { classes, weeks, exams, blockedDays, blockedClassDays, selectedSubjects, pdfSettings };
 
   // Auto-save effect
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
-  }, [classes, weeks, exams, blockedDays, blockedClassDays, selectedSubjects]);
+  }, [classes, weeks, exams, blockedDays, blockedClassDays, selectedSubjects, pdfSettings]);
 
   const handleImport = (schedules: ClassSchedule[]) => {
     setClasses(prev => {
@@ -127,6 +156,10 @@ function App() {
     });
   };
 
+  const handleUpdatePdfSettings = (settings: any) => {
+    setPdfSettings(settings);
+  };
+
   const handleExport = () => {
     const data = appState;
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -153,6 +186,7 @@ function App() {
           setBlockedDays(json.blockedDays || {});
           setBlockedClassDays(json.blockedClassDays || {});
           setSelectedSubjects(json.selectedSubjects || {});
+          if (json.pdfSettings) setPdfSettings(json.pdfSettings);
         } else {
           alert('Ungültige Datei-Struktur');
         }
@@ -175,9 +209,22 @@ function App() {
       setBlockedDays({});
       setBlockedClassDays({});
       setSelectedSubjects({});
+      setPdfSettings({
+        title: 'Klausurplanung 2025 – 1. Quartal',
+        makeupExamInfo: '**',
+        gradesDueDate: '27.10.'
+      });
+      setCollapsed({
+        import: false,
+        config: false,
+        schedule: false,
+        subjects: false
+      });
       window.location.reload(); // Hard reset to ensure clean state
     }
   };
+
+  const areAllCollapsed = Object.values(collapsed).every(Boolean);
 
   return (
     <div style={{ padding: '2rem', maxWidth: '1600px', margin: '0 auto' }}>
@@ -186,6 +233,20 @@ function App() {
           Klausurplaner AI
         </h1>
         <div style={{ display: 'flex', gap: '1rem' }}>
+          {/* Collapse Control */}
+          <button
+            onClick={() => toggleAll(!areAllCollapsed)}
+            style={{
+              background: 'var(--bg-panel)', color: 'var(--text-secondary)', border: '1px solid var(--border-color)',
+              padding: '0.75rem 1rem', borderRadius: '6px', fontWeight: 600, fontSize: '0.9rem'
+            }}
+            title={areAllCollapsed ? "Alle ausklappen" : "Alle einklappen"}
+          >
+            {areAllCollapsed ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+          </button>
+
+          <div style={{ width: '1px', background: 'var(--border-color)', margin: '0 0.5rem' }}></div>
+
           <button
             onClick={handleReset}
             style={{
@@ -248,7 +309,7 @@ function App() {
           </button>
 
           <button
-            onClick={() => generatePDF({ classes, weeks, exams, blockedDays, blockedClassDays, selectedSubjects })}
+            onClick={() => generatePDF(appState)}
             disabled={classes.length === 0}
             style={{
               background: 'var(--bg-panel)', color: 'var(--accent-primary)', border: '1px solid var(--accent-primary)',
@@ -261,33 +322,52 @@ function App() {
         </div>
       </header>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', alignItems: 'start' }}>
-        <ImportSection onImport={handleImport} />
-        <ConfigSection weeks={weeks} onUpdateWeeks={setWeeks} />
-      </div>
-
-      {classes.length > 0 && (
-        <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', alignItems: 'start' }}>
+      <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'flex-start' }}>
+        {/* Left Column */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          <ImportSection
+            onImport={handleImport}
+            isCollapsed={collapsed.import}
+            onToggle={() => toggleCollapse('import')}
+          />
+          {classes.length > 0 && (
             <ScheduleEditor
               classes={classes}
               onUpdateClass={handleUpdateClass}
+              isCollapsed={collapsed.schedule}
+              onToggle={() => toggleCollapse('schedule')}
             />
+          )}
+        </div>
+
+        {/* Right Column */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          <ConfigSection
+            weeks={weeks}
+            onUpdateWeeks={setWeeks}
+            pdfSettings={pdfSettings}
+            onUpdatePdfSettings={handleUpdatePdfSettings}
+            isCollapsed={collapsed.config}
+            onToggle={() => toggleCollapse('config')}
+          />
+          {classes.length > 0 && (
             <SubjectSelection
               classes={classes}
               selectedSubjects={selectedSubjects}
               onUpdateSelection={setSelectedSubjects}
+              isCollapsed={collapsed.subjects}
+              onToggle={() => toggleCollapse('subjects')}
             />
-          </div>
+          )}
+        </div>
+      </div>
 
-          <CalendarBoard
-            state={appState}
-            onMoveExam={handleMoveExam}
-            onTogglePin={handleTogglePin}
-            onToggleBlockClassDay={handleToggleBlockClassDay}
-          />
-        </>
-      )}
+      <CalendarBoard
+        state={appState}
+        onMoveExam={handleMoveExam}
+        onTogglePin={handleTogglePin}
+        onToggleBlockClassDay={handleToggleBlockClassDay}
+      />
 
       {classes.length === 0 && (
         <div style={{ textAlign: 'center', padding: '4rem', color: 'var(--text-secondary)' }}>

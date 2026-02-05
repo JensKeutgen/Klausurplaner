@@ -218,11 +218,16 @@ export function CalendarBoard({ state, onMoveExam, onTogglePin, onToggleBlockCla
                                             week.isBlocked ||
                                             !!state.blockedClassDays?.[cls.className]?.[week.id]?.[day];
 
+                                        // A/B Subject Check
+                                        const weekSubjects = (week.weekType === 'B' && cls.subjectsB)
+                                            ? cls.subjectsB[day] || []
+                                            : cls.subjects[day] || [];
+
                                         const isHighlight =
                                             !!activeDraggable &&
                                             activeDraggable.className === cls.className &&
                                             !isBlocked &&
-                                            (cls.subjects[day] || []).includes(activeDraggable.subject);
+                                            weekSubjects.includes(activeDraggable.subject);
 
                                         return (
                                             <div key={`${cls.className}-${week.id}-${day}`} style={{ overflow: 'hidden' }}>
@@ -233,7 +238,7 @@ export function CalendarBoard({ state, onMoveExam, onTogglePin, onToggleBlockCla
                                                     onClick={() => onToggleBlockClassDay?.(cls.className, week.id, day)}
                                                 >
                                                     {cellExams.map(exam => {
-                                                        const check = validateMove(exam, week.id, day, state.exams, cls, state.blockedDays);
+                                                        const check = validateMove(exam, week.id, day, state.exams, cls, state.weeks, state.blockedDays, state.blockedClassDays);
                                                         return (
                                                             <ExamCard
                                                                 key={exam.id}

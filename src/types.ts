@@ -5,7 +5,10 @@ export const DAYS_OF_WEEK: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thu
 export interface ClassSchedule {
   className: string;
   subjects: {
-    [key in DayOfWeek]: string[]; // Array of subjects for that day
+    [key in DayOfWeek]: string[]; // Array of subjects for that day (Week A default)
+  };
+  subjectsB?: {
+    [key in DayOfWeek]: string[]; // Array of subjects for Week B
   };
 }
 
@@ -24,6 +27,7 @@ export interface Week {
   weekNumber: number;
   year: number;
   isBlocked: boolean; // Entire week blocked
+  weekType: 'A' | 'B'; // A/B Week toggle
 }
 
 // Map of WeekId -> Day -> boolean (true if blocked globally)
@@ -32,6 +36,12 @@ export type BlockedDays = Record<string, Record<DayOfWeek, boolean>>;
 // Map of ClassName -> WeekId -> Day -> boolean (true if blocked for that class)
 export type BlockedClassDays = Record<string, Record<string, Record<DayOfWeek, boolean>>>;
 
+export interface PdfSettings {
+  title: string;
+  makeupExamInfo: string;
+  gradesDueDate: string;
+}
+
 export interface AppState {
   classes: ClassSchedule[];
   weeks: Week[];
@@ -39,4 +49,5 @@ export interface AppState {
   blockedDays: BlockedDays;
   blockedClassDays: BlockedClassDays;
   selectedSubjects: Record<string, string[]>;
+  pdfSettings: PdfSettings;
 }
