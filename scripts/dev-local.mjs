@@ -31,6 +31,25 @@ const bridgeProc = spawn(pythonExe, ['-u', bridgeScript], {
   stdio: 'inherit',
 });
 
+const tsxEntry = path.join(rootDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const mcpScript = path.join(rootDir, 'server', 'mcp.ts');
+let mcpProc = null;
+
+if (fs.existsSync(tsxEntry) && fs.existsSync(mcpScript)) {
+  console.log('[dev-local] Starte Klausurplaner MCP-Server (http://127.0.0.1:8788/mcp)...');
+  mcpProc = spawn(process.execPath, [tsxEntry, mcpScript], {
+    cwd: rootDir,
+    stdio: 'inherit',
+  });
+  mcpProc.on('exit', (code) => {
+    if (code && code !== 0) {
+      console.warn(`[dev-local] MCP-Server wurde mit Code ${code} beendet. Frontend läuft weiter.`);
+    }
+  });
+} else {
+  console.warn('[dev-local] Hinweis: tsx nicht gefunden, MCP-Server wird nicht gestartet (npm install ausführen).');
+}
+
 const viteEntry = path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
 
 console.log('[dev-local] Starte Vite Frontend...');
@@ -51,6 +70,7 @@ const viteProc = fs.existsSync(viteEntry)
 
 function shutdown(signal) {
   if (!bridgeProc.killed) bridgeProc.kill(signal);
+  if (mcpProc && !mcpProc.killed) mcpProc.kill(signal);
   if (!viteProc.killed) viteProc.kill(signal);
 }
 
@@ -59,6 +79,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 viteProc.on('exit', (code) => {
   bridgeProc.kill('SIGTERM');
+  if (mcpProc && !mcpProc.killed) mcpProc.kill('SIGTERM');
   process.exit(code ?? 0);
 });
 

@@ -58,6 +58,7 @@ type WorkspaceTab = 'import' | 'subjects' | 'schedules' | 'calendar';
 type ThemeMode = 'light' | 'dark';
 
 const STORAGE_KEY = 'klausurplaner_v1';
+const REVISION_STORAGE_KEY = 'klausurplaner_revision_v1';
 const THEME_STORAGE_KEY = 'klausurplaner_theme';
 
 const DEFAULT_PDF_SETTINGS: PdfSettings = {
@@ -252,10 +253,16 @@ function PlannerWorkspace() {
     const [edupageApiAvailable, setEdupageApiAvailable] = useState(false);
     const [edupageLoggedIn, setEdupageLoggedIn] = useState(false);
     const [saveStatus, setSaveStatus] = useState<'browser' | 'synced' | 'saving'>('browser');
+    const [externalSyncNotice, setExternalSyncNotice] = useState<string | null>(null);
     const [edupageSyncLoading, setEdupageSyncLoading] = useState(false);
     const [edupageSyncMessage, setEdupageSyncMessage] = useState<string | null>(null);
     const hydratedFromDiskRef = useRef(false);
     const lastSyncedKeyRef = useRef<string>('');
+    const initialSyncDoneRef = useRef(false);
+    const lastSyncedRevisionRef = useRef<number | null>(null);
+    const suppressNextAutoSaveRef = useRef(false);
+    const pendingAutoSaveRef = useRef(false);
+    const saveInFlightRef = useRef(false);
 
     // Apply Light/Dark theme attribute to <html>
     useEffect(() => {
@@ -423,18 +430,20 @@ function PlannerWorkspace() {
         setReviewSync(norm.reviewSync);
     }, []);
 
-    // Check local bridge health & hydrate from disk file if localStorage has no classes yet
+    const showExternalSyncNotice = useCallback((msg: string) => {
+        setExternalSyncNotice(msg);
+        window.setTimeout(() => {
+            setExternalSyncNotice((cur) => (cur === msg ? null : cur));
+        }, 4500);
+    }, []);
+
+    // Check local bridge health & hydrate from disk file if newer or localStorage is empty
     useEffect(() => {
         let cancelled = false;
         fetch('/api/health')
             .then((r) => (r.ok ? r.json() : null))
             .then(async (health) => {
                 if (!health || cancelled) return;
-                setBridgeOnline(true);
-                setEdupageApiAvailable(!!health.edupageAvailable);
-                if (health.loggedIn) {
-                    setEdupageLoggedIn(true);
-                }
 
                 if (health.hasSavedState && !hydratedFromDiskRef.current) {
                     hydratedFromDiskRef.current = true;
@@ -442,21 +451,50 @@ function PlannerWorkspace() {
                         localStorage.getItem(STORAGE_KEY) &&
                             JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')?.classes?.length
                     );
-                    if (!hasLocalClasses) {
-                        const stateRes = await fetch('/api/state');
-                        if (stateRes.ok && !cancelled) {
-                            const payload = await stateRes.json();
-                            if (payload?.state) {
-                                const norm = normalizeAppState(payload.state);
-                                applyNormalizedState(norm);
+                    const localRevision = Number(localStorage.getItem(REVISION_STORAGE_KEY) || '0') || 0;
+
+                    const stateRes = await fetch('/api/state');
+                    if (stateRes.ok && !cancelled) {
+                        const payload = await stateRes.json();
+                        const remoteRev = Number(payload?.revision || 0);
+                        lastSyncedRevisionRef.current = remoteRev;
+
+                        const shouldHydrateFromDisk =
+                            Boolean(payload?.state) &&
+                            (!hasLocalClasses ||
+                                (remoteRev > localRevision && !(localRevision === 0 && remoteRev <= 1)));
+
+                        if (shouldHydrateFromDisk && payload?.state) {
+                            const norm = normalizeAppState(payload.state);
+                            suppressNextAutoSaveRef.current = true;
+                            applyNormalizedState(norm);
+                            try {
+                                localStorage.setItem(REVISION_STORAGE_KEY, String(remoteRev));
+                            } catch {
+                                // ignore
+                            }
+                            if (hasLocalClasses && payload?.updatedBy === 'mcp') {
+                                showExternalSyncNotice('Plan via MCP geladen');
                             }
                         }
                     }
+                } else {
+                    lastSyncedRevisionRef.current = 0;
                 }
-                if (!cancelled) setSaveStatus('synced');
+
+                if (!cancelled) {
+                    initialSyncDoneRef.current = true;
+                    setBridgeOnline(true);
+                    setEdupageApiAvailable(!!health.edupageAvailable);
+                    if (health.loggedIn) {
+                        setEdupageLoggedIn(true);
+                    }
+                    setSaveStatus('synced');
+                }
             })
             .catch(() => {
                 if (!cancelled) {
+                    initialSyncDoneRef.current = true;
                     setBridgeOnline(false);
                     setSaveStatus('browser');
                 }
@@ -464,7 +502,7 @@ function PlannerWorkspace() {
         return () => {
             cancelled = true;
         };
-    }, [applyNormalizedState]);
+    }, [applyNormalizedState, showExternalSyncNotice]);
 
     // Auto-save effect: immediate localStorage + debounced local file sync when bridge is online
     useEffect(() => {
@@ -474,27 +512,132 @@ function PlannerWorkspace() {
             console.error('localStorage save failed:', err);
         }
 
-        if (!bridgeOnline) {
+        if (suppressNextAutoSaveRef.current) {
+            suppressNextAutoSaveRef.current = false;
+            pendingAutoSaveRef.current = false;
             return;
         }
 
+        if (!bridgeOnline || !initialSyncDoneRef.current) {
+            return;
+        }
+
+        pendingAutoSaveRef.current = true;
         const timer = setTimeout(() => {
+            pendingAutoSaveRef.current = false;
+            saveInFlightRef.current = true;
             setSaveStatus('saving');
+
+            const expectedRevision =
+                lastSyncedRevisionRef.current !== null && lastSyncedRevisionRef.current > 0
+                    ? lastSyncedRevisionRef.current
+                    : undefined;
+
             fetch('/api/state', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ state: appState }),
+                body: JSON.stringify({
+                    state: appState,
+                    expectedRevision,
+                    source: 'browser',
+                }),
             })
-                .then((r) => {
-                    if (r.ok) setSaveStatus('synced');
+                .then(async (r) => {
+                    if (r.status === 409) {
+                        const conflict = await r.json().catch(() => null);
+                        if (conflict?.state) {
+                            const nextRev = Number(conflict.currentRevision || 0);
+                            lastSyncedRevisionRef.current = nextRev;
+                            suppressNextAutoSaveRef.current = true;
+                            applyNormalizedState(normalizeAppState(conflict.state));
+                            try {
+                                localStorage.setItem(REVISION_STORAGE_KEY, String(nextRev));
+                            } catch {
+                                // ignore
+                            }
+                            setSaveStatus('synced');
+                            showExternalSyncNotice('Externe MCP-Änderung übernommen');
+                        }
+                        return;
+                    }
+                    if (r.ok) {
+                        const resData = await r.json().catch(() => null);
+                        if (typeof resData?.revision === 'number') {
+                            lastSyncedRevisionRef.current = resData.revision;
+                            try {
+                                localStorage.setItem(REVISION_STORAGE_KEY, String(resData.revision));
+                            } catch {
+                                // ignore
+                            }
+                        }
+                        setSaveStatus('synced');
+                    }
                 })
                 .catch(() => {
                     setSaveStatus('browser');
+                })
+                .finally(() => {
+                    saveInFlightRef.current = false;
                 });
         }, 250);
 
-        return () => clearTimeout(timer);
-    }, [appState, bridgeOnline]);
+        return () => {
+            clearTimeout(timer);
+            pendingAutoSaveRef.current = false;
+        };
+    }, [appState, bridgeOnline, applyNormalizedState, showExternalSyncNotice]);
+
+    // Live-poll local bridge for external updates (e.g. pushed via MCP)
+    useEffect(() => {
+        if (!bridgeOnline) return;
+        let cancelled = false;
+
+        const poll = async () => {
+            if (cancelled || saveInFlightRef.current || pendingAutoSaveRef.current) return;
+            try {
+                const res = await fetch('/api/state/version');
+                if (!res.ok || cancelled) return;
+                const ver = await res.json();
+                const remoteRev = Number(ver?.revision || 0);
+                if (
+                    ver?.hasState &&
+                    lastSyncedRevisionRef.current !== null &&
+                    remoteRev > lastSyncedRevisionRef.current &&
+                    !saveInFlightRef.current &&
+                    !pendingAutoSaveRef.current
+                ) {
+                    const stateRes = await fetch('/api/state');
+                    if (!stateRes.ok || cancelled) return;
+                    const payload = await stateRes.json();
+                    if (payload?.state && !saveInFlightRef.current && !pendingAutoSaveRef.current) {
+                        const syncedRev = Number(payload.revision || remoteRev);
+                        lastSyncedRevisionRef.current = syncedRev;
+                        suppressNextAutoSaveRef.current = true;
+                        applyNormalizedState(normalizeAppState(payload.state));
+                        try {
+                            localStorage.setItem(REVISION_STORAGE_KEY, String(syncedRev));
+                        } catch {
+                            // ignore
+                        }
+                        setSaveStatus('synced');
+                        showExternalSyncNotice(
+                            payload.updatedBy === 'restore'
+                                ? 'Backup wiederhergestellt ✓'
+                                : 'Plan via MCP aktualisiert ✓'
+                        );
+                    }
+                }
+            } catch {
+                // ignore transient poll failures
+            }
+        };
+
+        const interval = window.setInterval(poll, 1500);
+        return () => {
+            cancelled = true;
+            window.clearInterval(interval);
+        };
+    }, [bridgeOnline, applyNormalizedState, showExternalSyncNotice]);
 
     const mergeSchedulesPreservingCustom = useCallback(
         (prevClasses: ClassSchedule[], incomingSchedules: ClassSchedule[]): ClassSchedule[] => {
@@ -953,7 +1096,9 @@ function PlannerWorkspace() {
             )
         ) {
             localStorage.removeItem(STORAGE_KEY);
+            localStorage.removeItem(REVISION_STORAGE_KEY);
             const fresh = normalizeAppState(null);
+            suppressNextAutoSaveRef.current = true;
             applyNormalizedState(fresh);
             setEdupageSyncMessage(null);
             lastSyncedKeyRef.current = '';
@@ -962,8 +1107,25 @@ function PlannerWorkspace() {
                 fetch('/api/state', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ state: fresh }),
-                }).catch(() => {});
+                    body: JSON.stringify({
+                        state: fresh,
+                        source: 'browser-reset',
+                        createBackup: true,
+                        backupReason: 'reset',
+                    }),
+                })
+                    .then(async (r) => {
+                        const res = await r.json().catch(() => null);
+                        if (typeof res?.revision === 'number') {
+                            lastSyncedRevisionRef.current = res.revision;
+                            try {
+                                localStorage.setItem(REVISION_STORAGE_KEY, String(res.revision));
+                            } catch {
+                                // ignore
+                            }
+                        }
+                    })
+                    .catch(() => {});
             }
         }
     };
@@ -1072,6 +1234,24 @@ function PlannerWorkspace() {
                                   ? 'Lokal + Datei ✓'
                                   : 'Browser ✓'}
                         </span>
+                        {externalSyncNotice && (
+                            <span
+                                style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    fontSize: '0.72rem',
+                                    fontWeight: 700,
+                                    padding: '3px 9px',
+                                    borderRadius: '999px',
+                                    background: 'var(--accent-soft)',
+                                    border: '1px solid var(--accent-primary)',
+                                    color: 'var(--accent-primary)',
+                                }}
+                            >
+                                {externalSyncNotice}
+                            </span>
+                        )}
                     </div>
 
                     {/* Center: 4 Workspace Tabs */}

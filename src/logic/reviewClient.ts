@@ -14,6 +14,8 @@ import {
 } from '../types';
 import { getTeachersForSubjectOnDay } from './solver';
 
+export const DEFAULT_REVIEW_SERVER_URL = 'https://klausurplaner.pages.dev';
+
 export function getReviewPlanIdFromLocation(): string | null {
   if (typeof window === 'undefined') return null;
   const params = new URLSearchParams(window.location.search);
@@ -31,19 +33,20 @@ export function isLocalDevHost(): boolean {
   return window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
 }
 
-export function getEffectiveServerUrl(configuredUrl?: string): string {
+export function getEffectiveServerUrl(configuredUrl?: string, fallbackToDefault = true): string {
   const trimmed = (configuredUrl || '').trim().replace(/\/+$/, '');
   if (trimmed) return trimmed;
-  const envUrl = (import.meta.env.VITE_REVIEW_API_URL as string | undefined)?.trim().replace(/\/+$/, '');
+  const metaEnv = (import.meta as { env?: Record<string, string | undefined> }).env;
+  const envUrl = metaEnv?.VITE_REVIEW_API_URL?.trim().replace(/\/+$/, '');
   if (envUrl) return envUrl;
   if (typeof window !== 'undefined' && !isLocalDevHost()) {
     return window.location.origin;
   }
-  return '';
+  return fallbackToDefault ? DEFAULT_REVIEW_SERVER_URL : '';
 }
 
 export function buildReviewShareUrl(planId: string, serverUrl?: string): string {
-  const base = getEffectiveServerUrl(serverUrl) || (typeof window !== 'undefined' ? window.location.origin : '');
+  const base = getEffectiveServerUrl(serverUrl) || DEFAULT_REVIEW_SERVER_URL;
   return `${base}/review/${encodeURIComponent(planId)}`;
 }
 
@@ -377,12 +380,12 @@ export async function fetchPlanMeta(planId: string): Promise<{
   updatedAt: string;
   unlocked: boolean;
 }> {
-  const base = getEffectiveServerUrl();
+  const base = getEffectiveServerUrl(undefined, false);
   return apiFetch(`${base}/api/review/plans/${encodeURIComponent(planId)}/meta`);
 }
 
 export async function unlockReviewPlan(planId: string, passcode: string): Promise<{ ok: boolean }> {
-  const base = getEffectiveServerUrl();
+  const base = getEffectiveServerUrl(undefined, false);
   return apiFetch(`${base}/api/review/plans/${encodeURIComponent(planId)}/unlock`, {
     method: 'POST',
     body: JSON.stringify({ passcode }),
@@ -393,7 +396,7 @@ export async function fetchColleaguePlan(
   planId: string,
   reviewerToken: string
 ): Promise<{ plan: ReviewPlanData; mySubmission: ReviewSubmission | null }> {
-  const base = getEffectiveServerUrl();
+  const base = getEffectiveServerUrl(undefined, false);
   return apiFetch(`${base}/api/review/plans/${encodeURIComponent(planId)}`, {
     method: 'GET',
     headers: {
@@ -428,7 +431,7 @@ export async function submitColleagueFeedback(
   planId: string,
   payload: SubmitFeedbackPayload
 ): Promise<{ ok: boolean; submission: ReviewSubmission }> {
-  const base = getEffectiveServerUrl();
+  const base = getEffectiveServerUrl(undefined, false);
   return apiFetch(`${base}/api/review/plans/${encodeURIComponent(planId)}/submit`, {
     method: 'POST',
     body: JSON.stringify(payload),

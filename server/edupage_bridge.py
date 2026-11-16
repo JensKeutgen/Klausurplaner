@@ -23,12 +23,15 @@ from urllib.parse import urlparse
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATE_FILE = DATA_DIR / "klausurplan.json"
+STATE_META_FILE = DATA_DIR / "klausurplan_meta.json"
+BACKUP_DIR = DATA_DIR / "backups"
 CONFIG_FILE = DATA_DIR / "edupage_config.json"
 
 PORT = int(os.environ.get("EDUPAGE_BRIDGE_PORT", "8787"))
 HOST = os.environ.get("EDUPAGE_BRIDGE_HOST", "127.0.0.1")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 FILE_LOCK = threading.Lock()
 
 try:
@@ -105,20 +108,170 @@ def _infer_grade_level(class_name: str, api_grade: Any = None) -> str:
     return trimmed
 
 
-def _atomic_write_json(path: Path, data: Any, restrict_perms: bool = False) -> None:
+def _write_json_unlocked(path: Path, data: Any, restrict_perms: bool = False) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if restrict_perms and os.name == "posix":
+        os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, path)
+
+
+def _read_json_unlocked(path: Path, default: Any = None) -> Any:
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _atomic_write_json(path: Path, data: Any, restrict_perms: bool = False) -> None:
     with FILE_LOCK:
-        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        if restrict_perms and os.name == "posix":
-            os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, path)
+        _write_json_unlocked(path, data, restrict_perms=restrict_perms)
 
 
 def _read_json(path: Path, default: Any = None) -> Any:
     with FILE_LOCK:
-        if not path.exists():
-            return default
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _read_json_unlocked(path, default=default)
+
+
+def _get_state_meta_unlocked() -> dict[str, Any]:
+    meta = _read_json_unlocked(STATE_META_FILE, None)
+    if isinstance(meta, dict) and isinstance(meta.get("revision"), int):
+        return meta
+    if STATE_FILE.exists():
+        mtime = datetime.datetime.fromtimestamp(STATE_FILE.stat().st_mtime).isoformat()
+        meta = {"revision": 1, "updatedAt": mtime, "updatedBy": "disk"}
+        _write_json_unlocked(STATE_META_FILE, meta)
+        return meta
+    return {"revision": 0, "updatedAt": None, "updatedBy": None}
+
+
+def _create_backup_unlocked(current_state: Any, current_rev: int, reason: str = "") -> str | None:
+    if not isinstance(current_state, dict):
+        return None
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    safe_reason = re.sub(r"[^A-Za-z0-9_-]+", "-", reason).strip("-")[:32]
+    suffix = f"_{safe_reason}" if safe_reason else ""
+    filename = f"klausurplan_{ts}_rev{current_rev}{suffix}.json"
+    backup_path = BACKUP_DIR / filename
+    _write_json_unlocked(backup_path, current_state)
+
+    backups = sorted(BACKUP_DIR.glob("klausurplan_*.json"), key=lambda p: p.name, reverse=True)
+    for old in backups[30:]:
+        old.unlink(missing_ok=True)
+    return filename
+
+
+def _read_state_with_meta() -> tuple[Any, dict[str, Any]]:
+    with FILE_LOCK:
+        state = _read_json_unlocked(STATE_FILE, None)
+        meta = _get_state_meta_unlocked()
+        return state, meta
+
+
+def _get_state_meta() -> dict[str, Any]:
+    with FILE_LOCK:
+        return _get_state_meta_unlocked()
+
+
+def _save_state_with_meta(
+    new_state: dict[str, Any],
+    *,
+    expected_revision: int | None = None,
+    source: str = "browser",
+    create_backup: bool = False,
+    backup_reason: str = "",
+) -> tuple[bool, dict[str, Any], Any]:
+    with FILE_LOCK:
+        meta = _get_state_meta_unlocked()
+        current_rev = int(meta.get("revision") or 0)
+        current_state = _read_json_unlocked(STATE_FILE, None)
+
+        if (
+            expected_revision is not None
+            and STATE_FILE.exists()
+            and current_rev > 0
+            and int(expected_revision) != current_rev
+        ):
+            return False, meta, current_state
+
+        backup_name = None
+        if create_backup and current_state is not None:
+            backup_name = _create_backup_unlocked(current_state, current_rev, backup_reason or source)
+
+        next_rev = current_rev + 1
+        now_iso = datetime.datetime.now().isoformat()
+        next_meta = {
+            "revision": next_rev,
+            "updatedAt": now_iso,
+            "updatedBy": source,
+            "lastBackup": backup_name or meta.get("lastBackup"),
+        }
+        _write_json_unlocked(STATE_FILE, new_state)
+        _write_json_unlocked(STATE_META_FILE, next_meta)
+        return True, {**next_meta, "backupFile": backup_name}, None
+
+
+def _list_backups() -> list[dict[str, Any]]:
+    with FILE_LOCK:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(BACKUP_DIR.glob("klausurplan_*.json"), key=lambda p: p.name, reverse=True)
+        items: list[dict[str, Any]] = []
+        for f in files:
+            stat = f.stat()
+            items.append(
+                {
+                    "filename": f.name,
+                    "sizeBytes": stat.st_size,
+                    "createdAt": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                }
+            )
+        return items
+
+
+def _restore_backup(filename: str | None = None) -> tuple[bool, str | dict[str, Any]]:
+    with FILE_LOCK:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        if filename:
+            safe_name = Path(filename).name
+            target = BACKUP_DIR / safe_name
+        else:
+            files = sorted(BACKUP_DIR.glob("klausurplan_*.json"), key=lambda p: p.name, reverse=True)
+            if not files:
+                return False, "Keine Backups vorhanden."
+            target = files[0]
+
+        if not target.exists():
+            return False, f"Backup '{target.name}' nicht gefunden."
+
+        restored_state = _read_json_unlocked(target, None)
+        if not isinstance(restored_state, dict):
+            return False, f"Backup '{target.name}' ist ungültig."
+
+        meta = _get_state_meta_unlocked()
+        current_rev = int(meta.get("revision") or 0)
+        current_state = _read_json_unlocked(STATE_FILE, None)
+        safety_backup = None
+        if isinstance(current_state, dict):
+            safety_backup = _create_backup_unlocked(current_state, current_rev, "pre-restore")
+
+        next_rev = current_rev + 1
+        now_iso = datetime.datetime.now().isoformat()
+        next_meta = {
+            "revision": next_rev,
+            "updatedAt": now_iso,
+            "updatedBy": "restore",
+            "restoredFrom": target.name,
+            "lastBackup": safety_backup,
+        }
+        _write_json_unlocked(STATE_FILE, restored_state)
+        _write_json_unlocked(STATE_META_FILE, next_meta)
+        return True, {
+            "restoredFrom": target.name,
+            "safetyBackup": safety_backup,
+            "revision": next_rev,
+            "updatedAt": now_iso,
+            "state": restored_state,
+        }
 
 
 def _serialize_classes(classes: list[Any]) -> list[dict[str, Any]]:
@@ -1003,8 +1156,33 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/state":
-            state = _read_json(STATE_FILE, None)
-            self._send_json(HTTPStatus.OK, {"state": state})
+            state, meta = _read_state_with_meta()
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "state": state,
+                    "revision": meta.get("revision", 0),
+                    "updatedAt": meta.get("updatedAt"),
+                    "updatedBy": meta.get("updatedBy"),
+                },
+            )
+            return
+
+        if path == "/api/state/version":
+            meta = _get_state_meta()
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "hasState": STATE_FILE.exists(),
+                    "revision": meta.get("revision", 0),
+                    "updatedAt": meta.get("updatedAt"),
+                    "updatedBy": meta.get("updatedBy"),
+                },
+            )
+            return
+
+        if path == "/api/state/backups":
+            self._send_json(HTTPStatus.OK, {"backups": _list_backups()})
             return
 
         if path == "/api/edupage/config":
@@ -1040,8 +1218,56 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not isinstance(state, dict):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Erwarte 'state'-Objekt"})
                 return
-            _atomic_write_json(STATE_FILE, state)
-            self._send_json(HTTPStatus.OK, {"saved": True, "savedAt": datetime.datetime.now().isoformat()})
+            expected_rev = body.get("expectedRevision")
+            if expected_rev is not None:
+                try:
+                    expected_rev = int(expected_rev)
+                except (TypeError, ValueError):
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Ungültige expectedRevision"})
+                    return
+            source = str(body.get("source") or "browser")[:32]
+            create_backup = bool(body.get("createBackup", False))
+            backup_reason = str(body.get("backupReason") or "")
+
+            ok, meta, current_state = _save_state_with_meta(
+                state,
+                expected_revision=expected_rev,
+                source=source,
+                create_backup=create_backup,
+                backup_reason=backup_reason,
+            )
+            if not ok:
+                self._send_json(
+                    HTTPStatus.CONFLICT,
+                    {
+                        "error": "Plan wurde zwischenzeitlich extern geändert.",
+                        "currentRevision": meta.get("revision", 0),
+                        "updatedAt": meta.get("updatedAt"),
+                        "updatedBy": meta.get("updatedBy"),
+                        "state": current_state,
+                    },
+                )
+                return
+
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "saved": True,
+                    "revision": meta.get("revision"),
+                    "savedAt": meta.get("updatedAt"),
+                    "updatedBy": meta.get("updatedBy"),
+                    "backupFile": meta.get("backupFile"),
+                },
+            )
+            return
+
+        if path == "/api/state/restore":
+            filename = body.get("filename")
+            ok, result = _restore_backup(str(filename) if filename else None)
+            if not ok:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(result)})
+                return
+            self._send_json(HTTPStatus.OK, result)
             return
 
         if path == "/api/edupage/login":
