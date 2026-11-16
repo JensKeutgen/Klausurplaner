@@ -26,28 +26,32 @@ const pythonExe = resolvePythonExecutable();
 const bridgeScript = path.join(rootDir, 'server', 'edupage_bridge.py');
 
 console.log(`[dev-local] Starte EduPage-Bridge mit ${pythonExe}...`);
-const bridgeProc = spawn(pythonExe, [bridgeScript], {
+const bridgeProc = spawn(pythonExe, ['-u', bridgeScript], {
   cwd: rootDir,
   stdio: 'inherit',
 });
 
-const viteBin = path.join(
-  rootDir,
-  'node_modules',
-  '.bin',
-  process.platform === 'win32' ? 'vite.cmd' : 'vite'
-);
+const viteEntry = path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
 
 console.log('[dev-local] Starte Vite Frontend...');
-const viteProc = spawn(viteBin, [], {
-  cwd: rootDir,
-  stdio: 'inherit',
-  shell: process.platform === 'win32',
-});
+const viteProc = fs.existsSync(viteEntry)
+  ? spawn(process.execPath, [viteEntry], {
+      cwd: rootDir,
+      stdio: 'inherit',
+    })
+  : spawn(
+      path.join(rootDir, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite'),
+      [],
+      {
+        cwd: rootDir,
+        stdio: 'inherit',
+        shell: false,
+      }
+    );
 
 function shutdown(signal) {
-  bridgeProc.kill(signal);
-  viteProc.kill(signal);
+  if (!bridgeProc.killed) bridgeProc.kill(signal);
+  if (!viteProc.killed) viteProc.kill(signal);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
