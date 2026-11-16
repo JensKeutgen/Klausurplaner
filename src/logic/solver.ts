@@ -6,10 +6,23 @@ import {
     DEFAULT_SOLVER_SETTINGS,
     type Exam,
     type SolverSettings,
+    type SubjectTimingPreference,
     type Week,
 } from '../types';
 
 export const MAX_EXAMS_PER_WEEK = 2;
+
+export interface TimingPreferences {
+    global?: Record<string, SubjectTimingPreference>;
+    byClass?: Record<string, Record<string, SubjectTimingPreference>>;
+}
+
+export function getExamTimingPreference(
+    exam: Pick<Exam, 'className' | 'subject'>,
+    timing?: TimingPreferences
+): SubjectTimingPreference {
+    return timing?.byClass?.[exam.className]?.[exam.subject] ?? timing?.global?.[exam.subject] ?? 'normal';
+}
 
 const DAY_TO_INDEX: Record<DayOfWeek, number> = {
     Monday: 0,
@@ -17,6 +30,14 @@ const DAY_TO_INDEX: Record<DayOfWeek, number> = {
     Wednesday: 2,
     Thursday: 3,
     Friday: 4,
+};
+
+const GERMAN_DAY_FULL: Record<DayOfWeek, string> = {
+    Monday: 'Montag',
+    Tuesday: 'Dienstag',
+    Wednesday: 'Mittwoch',
+    Thursday: 'Donnerstag',
+    Friday: 'Freitag',
 };
 
 /**
@@ -27,16 +48,13 @@ export function inferGradeLevel(className: string): string {
     const trimmed = className.trim();
     if (!trimmed) return '';
 
-    // Pure numeric grade prefix: e.g. "10A", "11-2", "12_b"
     const numericMatch = trimmed.match(/^(\d{1,2})([A-Za-z_-].*)?$/);
     if (numericMatch) {
         return numericMatch[1];
     }
 
-    // Prefix + cohort digits + trailing class identifier: e.g. "BG25a", "ITA24-1", "HH23_2", "Q1a"
     const cohortMatch = trimmed.match(/^([A-Za-zÄÖÜäöüß]+\s*\d{1,4})(?:[-_ /.]*[A-Za-z0-9]+)?$/);
     if (cohortMatch) {
-        // Only strip trailing suffix if there actually is a trailing letter or separator+suffix
         const stripped = trimmed.replace(/(?:[-_ /.]+[A-Za-z0-9]+|[A-Za-z])$/, '');
         if (stripped && stripped.length >= 2) {
             return stripped;
@@ -83,7 +101,7 @@ export function getSubjectPeriodCount(
     return subjectsOnDay.filter((s) => s === subject).length;
 }
 
-// Extract teacher initials for a subject on a day
+// Extract teacher labels for a subject on a day
 export function getTeachersForSubjectOnDay(
     schedule: ClassSchedule | undefined,
     subject: string,
@@ -95,6 +113,62 @@ export function getTeachersForSubjectOnDay(
         ? schedule.subjectTeachersB
         : schedule.subjectTeachers;
     return map?.[day]?.[subject] || [];
+}
+
+// Extract all unique teachers teaching this subject across Week A & Week B in this class
+export function getAllTeachersForSubject(
+    schedule: ClassSchedule | undefined,
+    subject: string
+): string[] {
+    if (!schedule) return [];
+    const result = new Set<string>();
+    for (const day of DAYS_OF_WEEK) {
+        for (const t of schedule.subjectTeachers?.[day]?.[subject] || []) {
+            result.add(t);
+        }
+        for (const t of schedule.subjectTeachersB?.[day]?.[subject] || []) {
+            result.add(t);
+        }
+    }
+    return Array.from(result).sort();
+}
+
+// Returns the effective teacher(s) responsible for the exam on that day (respecting examTeacherBySubject)
+export function getEffectiveExamTeachers(
+    schedule: ClassSchedule | undefined,
+    subject: string,
+    day: DayOfWeek,
+    weekType: 'A' | 'B' = 'A'
+): string[] {
+    if (!schedule) return [];
+    const dayTeachers = getTeachersForSubjectOnDay(schedule, subject, day, weekType);
+    const chosen = schedule.examTeacherBySubject?.[subject];
+    if (chosen) {
+        if (dayTeachers.length > 0) {
+            return dayTeachers.includes(chosen) ? [chosen] : [];
+        }
+        return [chosen];
+    }
+    return dayTeachers;
+}
+
+export function isSubjectTaughtByExamTeacherOnDay(
+    schedule: ClassSchedule,
+    subject: string,
+    day: DayOfWeek,
+    weekType: 'A' | 'B' = 'A'
+): boolean {
+    if (!isSubjectTaughtOnDay(schedule, subject, day, weekType)) {
+        return false;
+    }
+    const chosen = schedule.examTeacherBySubject?.[subject];
+    if (!chosen) return true;
+
+    const allKnownTeachers = getAllTeachersForSubject(schedule, subject);
+    if (allKnownTeachers.length === 0) return true;
+
+    const dayTeachers = getTeachersForSubjectOnDay(schedule, subject, day, weekType);
+    return dayTeachers.includes(chosen);
 }
 
 // Helper: Count exams for a class in a given week
@@ -131,17 +205,26 @@ export function validateMove(
         return { valid: false, reason: `KW ${targetWeek.weekNumber} ist komplett blockiert.` };
     }
     if (blockedDays[targetWeekId]?.[targetDay]) {
-        return { valid: false, reason: 'Tag ist global blockiert (z. B. Feiertag/Konferenz).' };
+        return { valid: false, reason: 'Tag ist global blockiert (z. B. Ferien/Feiertag).' };
     }
     if (blockedClassDays[exam.className]?.[targetWeekId]?.[targetDay]) {
         return { valid: false, reason: `Tag ist für ${exam.className} blockiert.` };
     }
 
-    // 2. Check if subject is taught on that day
+    // 2. Check if subject (and chosen exam teacher) is taught on that day
     if (!isSubjectTaughtOnDay(classSchedule, exam.subject, targetDay, targetWeek.weekType)) {
         return {
             valid: false,
-            reason: `${exam.subject} wird am ${targetDay === 'Monday' ? 'Montag' : targetDay === 'Tuesday' ? 'Dienstag' : targetDay === 'Wednesday' ? 'Mittwoch' : targetDay === 'Thursday' ? 'Donnerstag' : 'Freitag'} in Woche ${targetWeek.weekType} nicht unterrichtet.`,
+            reason: `${exam.subject} wird am ${GERMAN_DAY_FULL[targetDay]} in Woche ${targetWeek.weekType} nicht unterrichtet.`,
+        };
+    }
+
+    if (!isSubjectTaughtByExamTeacherOnDay(classSchedule, exam.subject, targetDay, targetWeek.weekType)) {
+        const chosen = classSchedule.examTeacherBySubject?.[exam.subject];
+        const dayTeachers = getTeachersForSubjectOnDay(classSchedule, exam.subject, targetDay, targetWeek.weekType);
+        return {
+            valid: false,
+            reason: `${exam.subject} wird am ${GERMAN_DAY_FULL[targetDay]} (Woche ${targetWeek.weekType}) nicht bei ${chosen} unterrichtet${dayTeachers.length > 0 ? ` (nur: ${dayTeachers.join(', ')})` : ''}.`,
         };
     }
 
@@ -170,7 +253,7 @@ export function validateMove(
     const warnings: string[] = [];
 
     if (settings.avoidTeacherCollisions && allClasses.length > 0) {
-        const myTeachers = getTeachersForSubjectOnDay(
+        const myTeachers = getEffectiveExamTeachers(
             classSchedule,
             exam.subject,
             targetDay,
@@ -186,7 +269,7 @@ export function validateMove(
             );
             for (const other of sameDayOtherExams) {
                 const otherCls = allClasses.find((c) => c.className === other.className);
-                const otherTeachers = getTeachersForSubjectOnDay(
+                const otherTeachers = getEffectiveExamTeachers(
                     otherCls,
                     other.subject,
                     targetDay,
@@ -248,13 +331,27 @@ export interface ScheduleEvaluation {
     score: number;
 }
 
+function scoreTimingPlacement(
+    pref: SubjectTimingPreference,
+    weekIndex: number,
+    totalWeeks: number
+): number {
+    if (pref === 'normal' || totalWeeks <= 1) return 0;
+    const pos = weekIndex / (totalWeeks - 1); // 0 = first week, 1 = last week
+    if (pref === 'early') {
+        return Math.round(90 * (1 - 2 * pos));
+    }
+    return Math.round(90 * (2 * pos - 1));
+}
+
 export function evaluateSchedule(
     exams: Exam[],
     classes: ClassSchedule[],
     weeks: Week[],
     blockedDays: Record<string, Record<DayOfWeek, boolean>>,
     blockedClassDays: Record<string, Record<string, Record<DayOfWeek, boolean>>> = {},
-    settings: SolverSettings = DEFAULT_SOLVER_SETTINGS
+    settings: SolverSettings = DEFAULT_SOLVER_SETTINGS,
+    timing?: TimingPreferences
 ): ScheduleEvaluation {
     const classMap = new Map(classes.map((c) => [c.className, c]));
     const weekIdxMap = new Map(weeks.map((w, idx) => [w.id, idx]));
@@ -265,11 +362,8 @@ export function evaluateSchedule(
     let teacherConflicts = 0;
     let score = 0;
 
-    // Group by class to check spacing & weekly load
     const byClass = new Map<string, Exam[]>();
-    // Group by (gradeLevel, subject) to check same-week grouping
     const byGradeSubject = new Map<string, Exam[]>();
-    // Group by (weekId, day) for teacher collisions
     const bySlot = new Map<string, Exam[]>();
 
     for (const exam of exams) {
@@ -302,6 +396,8 @@ export function evaluateSchedule(
                 if (pCount >= 2) {
                     score += 15;
                 }
+                const pref = getExamTimingPreference(exam, timing);
+                score += scoreTimingPlacement(pref, weekIdx, weeks.length);
             }
 
             const list = byClass.get(exam.className) || [];
@@ -319,7 +415,6 @@ export function evaluateSchedule(
             slotList.push(exam);
             bySlot.set(slotKey, slotList);
         } else {
-            // Track unassigned in grade-subject group total too
             const grade = getEffectiveGradeLevel(cls, exam.className);
             const gsKey = `${grade}::${exam.subject}`;
             const gsList = byGradeSubject.get(gsKey) || [];
@@ -355,7 +450,6 @@ export function evaluateSchedule(
                     score -= 10;
                 }
             } else if (diff >= 3 && diff <= 4) {
-                // Good spacing within the same week
                 score += 20;
             }
         }
@@ -400,7 +494,7 @@ export function evaluateSchedule(
         }
     }
 
-    // 3. Teacher collisions on the same day
+    // 3. Teacher collisions on the same day (respects chosen exam teacher)
     for (const [slotKey, slotExams] of bySlot.entries()) {
         if (slotExams.length < 2) continue;
         const [weekId, dayStr] = slotKey.split('::');
@@ -411,7 +505,7 @@ export function evaluateSchedule(
         const teacherUsage = new Map<string, number>();
         for (const e of slotExams) {
             const cls = classMap.get(e.className);
-            const teachers = getTeachersForSubjectOnDay(cls, e.subject, day, weekType);
+            const teachers = getEffectiveExamTeachers(cls, e.subject, day, weekType);
             for (const t of new Set(teachers)) {
                 teacherUsage.set(t, (teacherUsage.get(t) || 0) + 1);
             }
@@ -458,10 +552,10 @@ function buildCandidatesForExam(
         DAYS_OF_WEEK.forEach((day, dayIndex) => {
             if (blockedDays[week.id]?.[day]) return;
             if (blockedClassDays[exam.className]?.[week.id]?.[day]) return;
-            if (!isSubjectTaughtOnDay(cls, exam.subject, day, week.weekType)) return;
+            if (!isSubjectTaughtByExamTeacherOnDay(cls, exam.subject, day, week.weekType)) return;
 
             const periodCount = getSubjectPeriodCount(cls, exam.subject, day, week.weekType);
-            const teachers = getTeachersForSubjectOnDay(cls, exam.subject, day, week.weekType);
+            const teachers = getEffectiveExamTeachers(cls, exam.subject, day, week.weekType);
 
             candidates.push({
                 weekIndex,
@@ -502,12 +596,18 @@ function scoreCandidateSlot(
     placedExams: Exam[],
     classMap: Map<string, ClassSchedule>,
     weekIdxMap: Map<string, number>,
-    settings: SolverSettings
+    totalWeeks: number,
+    settings: SolverSettings,
+    timing?: TimingPreferences
 ): number {
     let s = 0;
     const examCls = classMap.get(exam.className);
     const examGrade = getEffectiveGradeLevel(examCls, exam.className);
     const absDay = slot.weekIndex * 5 + slot.dayIndex;
+
+    // 0. Early / Late preference
+    const pref = getExamTimingPreference(exam, timing);
+    s += scoreTimingPlacement(pref, slot.weekIndex, totalWeeks);
 
     // 1. Prefer same week for same (Stufe, Fach) WITHOUT forcing same day
     if (settings.preferSameGradeSubjectSameWeek) {
@@ -518,7 +618,6 @@ function scoreCandidateSlot(
             const otherGrade = getEffectiveGradeLevel(otherCls, other.className);
             if (otherGrade === examGrade && other.assignedWeekId === slot.weekId) {
                 s += 160;
-                // Slight preference to NOT pile everything onto the exact same day if another day in that week is free (also avoids teacher clash)
                 if (other.assignedDay === slot.day) {
                     s -= 5;
                 }
@@ -548,7 +647,7 @@ function scoreCandidateSlot(
     }
     s -= weekCount * 35;
 
-    // 3. Teacher collision avoidance
+    // 3. Teacher collision avoidance (uses chosen exam teacher when specified)
     if (settings.avoidTeacherCollisions && slot.teachers.length > 0) {
         for (const other of placedExams) {
             if (
@@ -560,7 +659,7 @@ function scoreCandidateSlot(
                 continue;
             }
             const otherCls = classMap.get(other.className);
-            const otherTeachers = getTeachersForSubjectOnDay(otherCls, other.subject, slot.day, slot.weekType);
+            const otherTeachers = getEffectiveExamTeachers(otherCls, other.subject, slot.day, slot.weekType);
             if (slot.teachers.some((t) => otherTeachers.includes(t))) {
                 s -= 260;
             }
@@ -585,7 +684,8 @@ function runSingleSolverPass(
     blockedDays: Record<string, Record<DayOfWeek, boolean>>,
     blockedClassDays: Record<string, Record<string, Record<DayOfWeek, boolean>>>,
     settings: SolverSettings,
-    randomizeTieBreak: boolean
+    randomizeTieBreak: boolean,
+    timing?: TimingPreferences
 ): { exams: Exam[]; evaluation: ScheduleEvaluation } {
     const classMap = new Map(classes.map((c) => [c.className, c]));
     const weekIdxMap = new Map(weeks.map((w, idx) => [w.id, idx]));
@@ -598,11 +698,15 @@ function runSingleSolverPass(
         assignedDay: null as DayOfWeek | null,
     }));
 
-    // MRV ordering: fewest candidates first, then larger (Stufe, Fach) groups first
+    // MRV ordering: fewest candidates first, then early/late timed subjects, then larger (Stufe, Fach) groups
     const orderedVars = [...varExams].sort((a, b) => {
         const candA = candidatesById.get(a.id)?.length || 0;
         const candB = candidatesById.get(b.id)?.length || 0;
         if (candA !== candB) return candA - candB;
+
+        const prefA = getExamTimingPreference(a, timing) !== 'normal' ? 1 : 0;
+        const prefB = getExamTimingPreference(b, timing) !== 'normal' ? 1 : 0;
+        if (prefA !== prefB) return prefB - prefA;
 
         const grpA = groupSizeById.get(a.id) || 1;
         const grpB = groupSizeById.get(b.id) || 1;
@@ -622,7 +726,7 @@ function runSingleSolverPass(
             const scored = validSlots.map((slot) => ({
                 slot,
                 score:
-                    scoreCandidateSlot(exam, slot, allWorking, classMap, weekIdxMap, settings) +
+                    scoreCandidateSlot(exam, slot, allWorking, classMap, weekIdxMap, weeks.length, settings, timing) +
                     (randomizeTieBreak ? (Math.random() - 0.5) * 28 : 0),
             }));
             scored.sort((a, b) => b.score - a.score);
@@ -631,14 +735,12 @@ function runSingleSolverPass(
             exam.assignedDay = chosen.day;
             allWorking.push(exam);
         } else {
-            // Try 1-step ejection: move a conflicting unpinned exam in the same class to another free slot
             let ejectedPlaced = false;
             const sameClassVars = allWorking.filter(
                 (other) => !other.isPinned && other.className === exam.className && other.assignedWeekId
             );
 
             for (const targetSlot of candidates) {
-                // Find blocking exams in same class for targetSlot
                 const blockers = sameClassVars.filter(
                     (other) =>
                         other.assignedWeekId === targetSlot.weekId &&
@@ -689,7 +791,8 @@ function runSingleSolverPass(
         weeks,
         blockedDays,
         blockedClassDays,
-        settings
+        settings,
+        timing
     );
 
     const maxRefinePasses = 3;
@@ -719,7 +822,8 @@ function runSingleSolverPass(
                     weeks,
                     blockedDays,
                     blockedClassDays,
-                    settings
+                    settings,
+                    timing
                 );
 
                 if (nextEval.score > bestScore) {
@@ -767,7 +871,8 @@ function runSingleSolverPass(
                     weeks,
                     blockedDays,
                     blockedClassDays,
-                    settings
+                    settings,
+                    timing
                 );
 
                 if (nextEval.score > currentEval.score) {
@@ -795,12 +900,12 @@ function solveExams(
     weeks: Week[],
     blockedDays: Record<string, Record<DayOfWeek, boolean>>,
     blockedClassDays: Record<string, Record<string, Record<DayOfWeek, boolean>>>,
-    settings: SolverSettings
+    settings: SolverSettings,
+    timing?: TimingPreferences
 ): Exam[] {
     const classMap = new Map(classes.map((c) => [c.className, c]));
     const candidatesById = new Map<string, CandidateSlot[]>();
 
-    // Compute group sizes for (gradeLevel, subject)
     const allExams = [...fixedExams, ...variableExams];
     const groupCounts = new Map<string, number>();
     for (const e of allExams) {
@@ -839,7 +944,8 @@ function solveExams(
             blockedDays,
             blockedClassDays,
             settings,
-            i > 0
+            i > 0,
+            timing
         );
 
         if (!bestResult || res.evaluation.score > bestResult.evaluation.score) {
@@ -858,7 +964,8 @@ export function distributeExams(
     selectedSubjects: Record<string, string[]>,
     blockedClassDays: Record<string, Record<string, Record<DayOfWeek, boolean>>> = {},
     existingExams: Exam[] = [],
-    settings: SolverSettings = DEFAULT_SOLVER_SETTINGS
+    settings: SolverSettings = DEFAULT_SOLVER_SETTINGS,
+    timing?: TimingPreferences
 ): Exam[] {
     const fixedExams: Exam[] = [];
     const variableExams: Exam[] = [];
@@ -895,7 +1002,7 @@ export function distributeExams(
         }
     }
 
-    return solveExams(fixedExams, variableExams, classes, weeks, blockedDays, blockedClassDays, settings);
+    return solveExams(fixedExams, variableExams, classes, weeks, blockedDays, blockedClassDays, settings, timing);
 }
 
 // Re-optimizes unpinned exams around pinned constraints
@@ -905,10 +1012,11 @@ export function autoFix(
     weeks: Week[],
     blockedDays: Record<string, Record<DayOfWeek, boolean>>,
     blockedClassDays: Record<string, Record<string, Record<DayOfWeek, boolean>>> = {},
-    settings: SolverSettings = DEFAULT_SOLVER_SETTINGS
+    settings: SolverSettings = DEFAULT_SOLVER_SETTINGS,
+    timing?: TimingPreferences
 ): Exam[] {
     const pinnedExams = exams.filter((e) => e.isPinned && e.assignedWeekId && e.assignedDay);
     const unpinned = exams.filter((e) => !(e.isPinned && e.assignedWeekId && e.assignedDay));
 
-    return solveExams(pinnedExams, unpinned, classes, weeks, blockedDays, blockedClassDays, settings);
+    return solveExams(pinnedExams, unpinned, classes, weeks, blockedDays, blockedClassDays, settings, timing);
 }

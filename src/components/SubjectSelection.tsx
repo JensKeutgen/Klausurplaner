@@ -1,143 +1,550 @@
-import { useMemo } from 'react';
-import { BookOpen, CheckSquare, Square, ChevronUp, ChevronDown } from 'lucide-react';
-import type { ClassSchedule } from '../types';
-import { getEffectiveGradeLevel } from '../logic/solver';
+import { useMemo, useState } from 'react';
+import { BookOpen, Check, Clock, Users, CheckSquare, Square } from 'lucide-react';
+import type { ClassSchedule, SubjectTimingPreference } from '../types';
+import { getAllTeachersForSubject, getEffectiveGradeLevel } from '../logic/solver';
 
 interface SubjectSelectionProps {
     classes: ClassSchedule[];
-    selectedSubjects: Record<string, string[]>; // className -> subject[]
+    selectedSubjects: Record<string, string[]>;
     onUpdateSelection: (selection: Record<string, string[]>) => void;
-    isCollapsed: boolean;
-    onToggle: () => void;
+    onUpdateClass: (updatedClass: ClassSchedule) => void;
+    subjectTiming: Record<string, SubjectTimingPreference>;
+    onUpdateSubjectTiming: (timing: Record<string, SubjectTimingPreference>) => void;
 }
 
-export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection, isCollapsed, onToggle }: SubjectSelectionProps) {
+export function SubjectSelection({
+    classes,
+    selectedSubjects,
+    onUpdateSelection,
+    onUpdateClass,
+    subjectTiming,
+    onUpdateSubjectTiming,
+}: SubjectSelectionProps) {
+    const [gradeFilter, setGradeFilter] = useState<string>('Alle');
+    const [onlyMultiTeacher, setOnlyMultiTeacher] = useState(false);
 
-    // Extract all unique subjects per class from both Week A and Week B
-    const classSubjects = useMemo(() => {
-        const map: Record<string, string[]> = {};
+    // Map className -> Set of taught subjects (A + B)
+    const classTaughtMap = useMemo(() => {
+        const map = new Map<string, Set<string>>();
         for (const cls of classes) {
-            const subjectsA = Object.values(cls.subjects).flat();
-            const subjectsB = cls.subjectsB ? Object.values(cls.subjectsB).flat() : [];
-            const unique = Array.from(new Set([...subjectsA, ...subjectsB])).sort();
-            map[cls.className] = unique;
+            const set = new Set<string>([
+                ...Object.values(cls.subjects).flat(),
+                ...(cls.subjectsB ? Object.values(cls.subjectsB).flat() : []),
+            ]);
+            map.set(cls.className, set);
         }
         return map;
     }, [classes]);
 
-    const toggleSubject = (className: string, subject: string) => {
-        const currentSelected = selectedSubjects[className] || [];
-        const isSelected = currentSelected.includes(subject);
+    const grades = useMemo(() => {
+        const set = new Set<string>();
+        classes.forEach((c) => {
+            const g = getEffectiveGradeLevel(c, c.className);
+            if (g) set.add(g);
+        });
+        return ['Alle', ...Array.from(set).sort()];
+    }, [classes]);
 
-        const newClassSelected = isSelected
-            ? currentSelected.filter(s => s !== subject)
-            : [...currentSelected, subject];
+    const visibleClasses = useMemo(() => {
+        return [...classes]
+            .filter((c) => gradeFilter === 'Alle' || getEffectiveGradeLevel(c, c.className) === gradeFilter)
+            .sort((a, b) => {
+                const ga = getEffectiveGradeLevel(a, a.className);
+                const gb = getEffectiveGradeLevel(b, b.className);
+                return ga !== gb ? ga.localeCompare(gb) : a.className.localeCompare(b.className);
+            });
+    }, [classes, gradeFilter]);
 
+    const allSubjects = useMemo(() => {
+        const set = new Set<string>();
+        visibleClasses.forEach((c) => {
+            classTaughtMap.get(c.className)?.forEach((s) => set.add(s));
+        });
+        let list = Array.from(set).sort();
+        if (onlyMultiTeacher) {
+            list = list.filter((sub) =>
+                visibleClasses.some((cls) => getAllTeachersForSubject(cls, sub).length >= 2)
+            );
+        }
+        return list;
+    }, [visibleClasses, classTaughtMap, onlyMultiTeacher]);
+
+    const globalSubjects = useMemo(() => {
+        const set = new Set<string>();
+        classes.forEach((c) => {
+            classTaughtMap.get(c.className)?.forEach((s) => set.add(s));
+        });
+        return Array.from(set).sort();
+    }, [classes, classTaughtMap]);
+
+    // Count how many visible classes teach & selected each subject
+    const subjectStats = useMemo(() => {
+        const stats: Record<string, { taughtIn: number; selectedIn: number }> = {};
+        for (const sub of globalSubjects) {
+            let taughtIn = 0;
+            let selectedIn = 0;
+            for (const cls of visibleClasses) {
+                if (classTaughtMap.get(cls.className)?.has(sub)) {
+                    taughtIn++;
+                    if ((selectedSubjects[cls.className] || []).includes(sub)) {
+                        selectedIn++;
+                    }
+                }
+            }
+            stats[sub] = { taughtIn, selectedIn };
+        }
+        return stats;
+    }, [globalSubjects, visibleClasses, classTaughtMap, selectedSubjects]);
+
+    const multiTeacherCount = useMemo(() => {
+        let count = 0;
+        for (const cls of classes) {
+            const subjs = classTaughtMap.get(cls.className) || new Set<string>();
+            for (const sub of subjs) {
+                if (getAllTeachersForSubject(cls, sub).length >= 2) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }, [classes, classTaughtMap]);
+
+    const toggleCell = (className: string, subject: string) => {
+        const current = selectedSubjects[className] || [];
+        const exists = current.includes(subject);
         onUpdateSelection({
             ...selectedSubjects,
-            [className]: newClassSelected
+            [className]: exists ? current.filter((s) => s !== subject) : [...current, subject],
         });
     };
 
-    const toggleClassAll = (className: string) => {
-        const allSubjects = classSubjects[className] || [];
-        const currentSelected = selectedSubjects[className] || [];
-
-        if (currentSelected.length === allSubjects.length) {
-            onUpdateSelection({
-                ...selectedSubjects,
-                [className]: []
-            });
-        } else {
-            onUpdateSelection({
-                ...selectedSubjects,
-                [className]: allSubjects
-            });
+    const toggleSubjectForVisible = (subject: string) => {
+        const stat = subjectStats[subject];
+        const selectAll = !stat || stat.selectedIn < stat.taughtIn;
+        const next = { ...selectedSubjects };
+        for (const cls of visibleClasses) {
+            if (!classTaughtMap.get(cls.className)?.has(subject)) continue;
+            const current = next[cls.className] || [];
+            if (selectAll) {
+                if (!current.includes(subject)) next[cls.className] = [...current, subject];
+            } else {
+                next[cls.className] = current.filter((s) => s !== subject);
+            }
         }
+        onUpdateSelection(next);
     };
 
+    const toggleClassAll = (className: string) => {
+        const taught = Array.from(classTaughtMap.get(className) || []);
+        const current = selectedSubjects[className] || [];
+        onUpdateSelection({
+            ...selectedSubjects,
+            [className]: current.length === taught.length ? [] : taught,
+        });
+    };
+
+    const setAllVisible = (selectAll: boolean) => {
+        const next = { ...selectedSubjects };
+        for (const cls of visibleClasses) {
+            next[cls.className] = selectAll ? Array.from(classTaughtMap.get(cls.className) || []) : [];
+        }
+        onUpdateSelection(next);
+    };
+
+    const setTiming = (subject: string, pref: SubjectTimingPreference) => {
+        onUpdateSubjectTiming({
+            ...subjectTiming,
+            [subject]: pref,
+        });
+    };
+
+    const setExamTeacher = (cls: ClassSchedule, subject: string, teacher: string) => {
+        const nextMap = { ...(cls.examTeacherBySubject || {}) };
+        if (!teacher) {
+            delete nextMap[subject];
+        } else {
+            nextMap[subject] = teacher;
+        }
+        onUpdateClass({
+            ...cls,
+            examTeacherBySubject: nextMap,
+        });
+    };
+
+    if (classes.length === 0) {
+        return (
+            <div className="ui-card" style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                Importiere zuerst Stundenpläne im Tab <strong>1. Import & Ferien</strong>, um Klausurfächer festzulegen.
+            </div>
+        );
+    }
+
     return (
-        <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem', background: 'var(--bg-card)', borderRadius: '8px', boxShadow: 'var(--shadow-md)' }}>
-            <div
-                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isCollapsed ? 0 : '1rem', cursor: 'pointer' }}
-                onClick={onToggle}
-            >
-                <h2 style={{ fontSize: '1.25rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-                    <BookOpen size={24} style={{ color: 'var(--accent-primary)' }} />
-                    Klausurfächer auswählen
-                </h2>
-                <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
-                    {isCollapsed ? <ChevronDown size={20} /> : <ChevronUp size={20} />}
-                </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            {/* Top Card: Global Subject Controls + Early/Normal/Late */}
+            <div className="ui-card" style={{ padding: '1.25rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.9rem' }}>
+                    <div>
+                        <h3 style={{ fontSize: '1.05rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <BookOpen size={19} color="var(--accent-primary)" />
+                            Fächer global schalten & Zeitfenster (Früh / Spät)
+                        </h3>
+                        <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                            Ein Klick schaltet ein Fach für {gradeFilter === 'Alle' ? 'alle Klassen' : `Stufe ${gradeFilter}`} an oder ab. Mit <strong>Früh / Spät</strong> steuerst du die zeitliche Lage.
+                        </p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                        <select
+                            className="ui-input"
+                            style={{ width: 'auto', fontSize: '0.82rem', padding: '5px 10px' }}
+                            value={gradeFilter}
+                            onChange={(e) => setGradeFilter(e.target.value)}
+                            title="Nach Stufe filtern"
+                        >
+                            {grades.map((g) => (
+                                <option key={g} value={g}>
+                                    {g === 'Alle' ? 'Alle Stufen' : `Stufe ${g}`}
+                                </option>
+                            ))}
+                        </select>
+                        <button type="button" className="ui-btn" onClick={() => setAllVisible(true)}>
+                            <CheckSquare size={14} /> Alle an
+                        </button>
+                        <button type="button" className="ui-btn" onClick={() => setAllVisible(false)}>
+                            <Square size={14} /> Alle aus
+                        </button>
+                    </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(225px, 1fr))', gap: '0.6rem' }}>
+                    {globalSubjects.map((sub) => {
+                        const stat = subjectStats[sub];
+                        if (!stat || stat.taughtIn === 0) return null;
+                        const allOn = stat.selectedIn === stat.taughtIn;
+                        const someOn = stat.selectedIn > 0 && stat.selectedIn < stat.taughtIn;
+                        const pref = subjectTiming[sub] || 'normal';
+
+                        return (
+                            <div
+                                key={sub}
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '6px',
+                                    padding: '6px 8px',
+                                    borderRadius: '8px',
+                                    border: `1px solid ${allOn ? 'var(--accent-primary)' : someOn ? 'var(--accent-warning)' : 'var(--border-subtle)'}`,
+                                    background: allOn ? 'var(--accent-soft)' : 'var(--bg-panel)',
+                                }}
+                            >
+                                <button
+                                    type="button"
+                                    onClick={() => toggleSubjectForVisible(sub)}
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        background: 'none',
+                                        border: 'none',
+                                        color: 'var(--text-primary)',
+                                        fontWeight: 700,
+                                        fontSize: '0.84rem',
+                                        minWidth: 0,
+                                    }}
+                                    title="Für alle sichtbaren Klassen an-/abwählen"
+                                >
+                                    <span
+                                        style={{
+                                            width: '16px',
+                                            height: '16px',
+                                            borderRadius: '4px',
+                                            border: `1px solid ${allOn || someOn ? 'var(--accent-primary)' : 'var(--border-color)'}`,
+                                            background: allOn ? 'var(--accent-primary)' : someOn ? 'var(--accent-warning)' : 'var(--bg-surface)',
+                                            color: '#fff',
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            fontSize: '0.7rem',
+                                            flexShrink: 0,
+                                        }}
+                                    >
+                                        {allOn ? <Check size={11} /> : someOn ? '−' : null}
+                                    </span>
+                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sub}</span>
+                                    <span style={{ fontSize: '0.72rem', fontWeight: 500, color: 'var(--text-muted)' }}>
+                                        {stat.selectedIn}/{stat.taughtIn}
+                                    </span>
+                                </button>
+
+                                {/* 3-way timing pill */}
+                                <div
+                                    style={{
+                                        display: 'inline-flex',
+                                        borderRadius: '6px',
+                                        border: '1px solid var(--border-color)',
+                                        overflow: 'hidden',
+                                        background: 'var(--bg-surface)',
+                                        flexShrink: 0,
+                                    }}
+                                    title="Zeitlicher Wunsch für den Smart-Solver"
+                                >
+                                    {(['early', 'normal', 'late'] as SubjectTimingPreference[]).map((mode) => {
+                                        const active = pref === mode;
+                                        const label = mode === 'early' ? 'Früh' : mode === 'late' ? 'Spät' : '•';
+                                        const activeBg =
+                                            mode === 'early'
+                                                ? 'var(--accent-success)'
+                                                : mode === 'late'
+                                                    ? 'var(--accent-purple)'
+                                                    : 'var(--bg-panel)';
+                                        const activeColor = mode === 'normal' ? 'var(--text-primary)' : '#fff';
+                                        return (
+                                            <button
+                                                key={mode}
+                                                type="button"
+                                                onClick={() => setTiming(sub, mode)}
+                                                style={{
+                                                    border: 'none',
+                                                    padding: '2px 6px',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: active ? 700 : 500,
+                                                    background: active ? activeBg : 'transparent',
+                                                    color: active ? activeColor : 'var(--text-muted)',
+                                                }}
+                                                title={
+                                                    mode === 'early'
+                                                        ? 'Eher früh im Zeitraum schreiben'
+                                                        : mode === 'late'
+                                                            ? 'Eher spät im Zeitraum schreiben'
+                                                            : 'Kein besonderer Zeitwunsch'
+                                                }
+                                            >
+                                                {label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
             </div>
 
-            {!isCollapsed && (
-                <>
-                    <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem', fontSize: '0.9rem' }}>
-                        Entferne den Haken bei Fächern, in denen keine Klausur geschrieben werden soll.
-                    </p>
+            {/* Matrix: Class x Subject + Multi-Teacher exam selector */}
+            <div className="ui-card" style={{ padding: '1.25rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                    <div>
+                        <h3 style={{ fontSize: '1.05rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Users size={19} color="var(--accent-primary)" />
+                            Klassen × Fächer Matrix & Prüfende Lehrkraft
+                        </h3>
+                        <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                            Ausnahmen pro Klasse direkt in der Tabelle ändern. Bei Fächern mit mehreren Lehrkräften kannst du hier festlegen, bei wem die Klausur geschrieben wird.
+                        </p>
+                    </div>
+                    {multiTeacherCount > 0 && (
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                            <input
+                                type="checkbox"
+                                checked={onlyMultiTeacher}
+                                onChange={(e) => setOnlyMultiTeacher(e.target.checked)}
+                            />
+                            Nur Fächer mit mehreren Lehrkräften ({multiTeacherCount})
+                        </label>
+                    )}
+                </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
-                        {classes.map(cls => {
-                            const allSubjects = classSubjects[cls.className] || [];
-                            const selected = selectedSubjects[cls.className] || [];
-                            const isAllSelected = allSubjects.length > 0 && selected.length === allSubjects.length;
-                            const grade = getEffectiveGradeLevel(cls, cls.className);
-
-                            return (
-                                <div key={cls.className} style={{ background: 'var(--bg-panel)', padding: '1rem', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
-                                    <div
-                                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-color)' }}
-                                    >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                            <span style={{ fontWeight: 600 }}>{cls.className}</span>
-                                            {grade && (
-                                                <span style={{ fontSize: '0.72rem', padding: '1px 6px', borderRadius: '4px', background: 'var(--bg-app)', color: 'var(--text-secondary)' }}>
-                                                    Stufe {grade}
-                                                </span>
-                                            )}
-                                        </div>
-                                        <button
-                                            onClick={(e) => { e.stopPropagation(); toggleClassAll(cls.className); }}
-                                            style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', fontSize: '0.8rem', cursor: 'pointer' }}
-                                            className="hover-opacity"
+                <div style={{ overflowX: 'auto', border: '1px solid var(--border-subtle)', borderRadius: '8px' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
+                        <thead>
+                            <tr style={{ background: 'var(--bg-panel)', borderBottom: '1px solid var(--border-color)' }}>
+                                <th
+                                    style={{
+                                        position: 'sticky',
+                                        left: 0,
+                                        zIndex: 3,
+                                        background: 'var(--bg-panel)',
+                                        textAlign: 'left',
+                                        padding: '8px 12px',
+                                        borderRight: '1px solid var(--border-color)',
+                                        minWidth: '140px',
+                                    }}
+                                >
+                                    Klasse / Stufe
+                                </th>
+                                {allSubjects.map((sub) => {
+                                    const pref = subjectTiming[sub] || 'normal';
+                                    return (
+                                        <th
+                                            key={sub}
+                                            style={{
+                                                padding: '6px 8px',
+                                                textAlign: 'center',
+                                                borderRight: '1px solid var(--border-subtle)',
+                                                minWidth: '92px',
+                                                cursor: 'pointer',
+                                            }}
+                                            onClick={() => toggleSubjectForVisible(sub)}
+                                            title={`Spalte "${sub}" für alle sichtbaren Klassen umschalten`}
                                         >
-                                            {isAllSelected ? 'Alle abwählen' : 'Alle auswählen'}
-                                        </button>
-                                    </div>
-
-                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                                        {allSubjects.map(sub => {
-                                            const isChecked = selected.includes(sub);
-                                            return (
-                                                <button
-                                                    key={sub}
-                                                    onClick={(e) => { e.stopPropagation(); toggleSubject(cls.className, sub); }}
+                                            <div style={{ fontWeight: 700 }}>{sub}</div>
+                                            {pref !== 'normal' && (
+                                                <div
                                                     style={{
-                                                        display: 'flex', alignItems: 'center', gap: '6px',
-                                                        padding: '4px 8px',
-                                                        borderRadius: '4px',
-                                                        border: '1px solid',
-                                                        borderColor: isChecked ? 'var(--accent-primary)' : 'var(--border-color)',
-                                                        background: isChecked ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
-                                                        color: isChecked ? 'var(--text-primary)' : 'var(--text-secondary)',
-                                                        fontSize: '0.85rem',
-                                                        cursor: 'pointer',
-                                                        transition: 'all 0.1s'
+                                                        fontSize: '0.66rem',
+                                                        color: pref === 'early' ? 'var(--accent-success)' : 'var(--accent-purple)',
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '2px',
                                                     }}
                                                 >
-                                                    {isChecked ? <CheckSquare size={14} /> : <Square size={14} />}
-                                                    {sub}
+                                                    <Clock size={10} /> {pref === 'early' ? 'Früh' : 'Spät'}
+                                                </div>
+                                            )}
+                                        </th>
+                                    );
+                                })}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {visibleClasses.map((cls) => {
+                                const grade = getEffectiveGradeLevel(cls, cls.className);
+                                const taughtSet = classTaughtMap.get(cls.className) || new Set<string>();
+                                const selected = selectedSubjects[cls.className] || [];
+                                const allRowSelected = taughtSet.size > 0 && selected.length === taughtSet.size;
+
+                                return (
+                                    <tr key={cls.className} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                                        <td
+                                            style={{
+                                                position: 'sticky',
+                                                left: 0,
+                                                zIndex: 2,
+                                                background: 'var(--bg-surface)',
+                                                padding: '8px 12px',
+                                                borderRight: '1px solid var(--border-color)',
+                                            }}
+                                        >
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 700 }}>{cls.className}</div>
+                                                    {grade && (
+                                                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Stufe {grade}</div>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleClassAll(cls.className)}
+                                                    style={{
+                                                        border: '1px solid var(--border-subtle)',
+                                                        background: 'var(--bg-panel)',
+                                                        color: 'var(--text-secondary)',
+                                                        borderRadius: '6px',
+                                                        padding: '2px 6px',
+                                                        fontSize: '0.7rem',
+                                                    }}
+                                                    title={allRowSelected ? 'Alle abwählen' : 'Alle auswählen'}
+                                                >
+                                                    {allRowSelected ? 'Keine' : 'Alle'}
                                                 </button>
+                                            </div>
+                                        </td>
+
+                                        {allSubjects.map((sub) => {
+                                            const isTaught = taughtSet.has(sub);
+                                            if (!isTaught) {
+                                                return (
+                                                    <td
+                                                        key={sub}
+                                                        style={{
+                                                            textAlign: 'center',
+                                                            color: 'var(--text-muted)',
+                                                            borderRight: '1px solid var(--border-subtle)',
+                                                            background: 'var(--bg-app)',
+                                                            opacity: 0.45,
+                                                        }}
+                                                    >
+                                                        —
+                                                    </td>
+                                                );
+                                            }
+
+                                            const isChecked = selected.includes(sub);
+                                            const teachers = getAllTeachersForSubject(cls, sub);
+                                            const chosenTeacher = cls.examTeacherBySubject?.[sub] || '';
+
+                                            return (
+                                                <td
+                                                    key={sub}
+                                                    style={{
+                                                        padding: '6px',
+                                                        textAlign: 'center',
+                                                        verticalAlign: 'middle',
+                                                        borderRight: '1px solid var(--border-subtle)',
+                                                        background: isChecked ? 'var(--accent-soft)' : 'transparent',
+                                                    }}
+                                                >
+                                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => toggleCell(cls.className, sub)}
+                                                            style={{
+                                                                width: '24px',
+                                                                height: '24px',
+                                                                borderRadius: '6px',
+                                                                border: `1px solid ${isChecked ? 'var(--accent-primary)' : 'var(--border-color)'}`,
+                                                                background: isChecked ? 'var(--accent-primary)' : 'var(--bg-surface)',
+                                                                color: '#ffffff',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                justifyContent: 'center',
+                                                            }}
+                                                            title={isChecked ? `${sub} in ${cls.className} abwählen` : `${sub} in ${cls.className} auswählen`}
+                                                        >
+                                                            {isChecked && <Check size={14} />}
+                                                        </button>
+
+                                                        {isChecked && teachers.length >= 2 && (
+                                                            <select
+                                                                value={chosenTeacher}
+                                                                onChange={(e) => setExamTeacher(cls, sub, e.target.value)}
+                                                                title="Mehrere Lehrkräfte gefunden: festlegen, bei wem die Klausur geschrieben wird"
+                                                                style={{
+                                                                    maxWidth: '104px',
+                                                                    fontSize: '0.68rem',
+                                                                    padding: '2px 4px',
+                                                                    borderRadius: '5px',
+                                                                    border: `1px solid ${chosenTeacher ? 'var(--accent-primary)' : 'var(--accent-warning)'}`,
+                                                                    background: 'var(--bg-surface)',
+                                                                    color: 'var(--text-primary)',
+                                                                }}
+                                                            >
+                                                                <option value="">Alle ({teachers.length})</option>
+                                                                {teachers.map((t) => (
+                                                                    <option key={t} value={t}>
+                                                                        Nur: {t}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                        )}
+
+                                                        {isChecked && teachers.length === 1 && (
+                                                            <span style={{ fontSize: '0.66rem', color: 'var(--text-muted)' }}>
+                                                                {teachers[0]}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </td>
                                             );
                                         })}
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </>
-            )}
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     );
 }

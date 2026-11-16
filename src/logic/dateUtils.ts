@@ -67,9 +67,34 @@ export function getWeekDateRangeString(week: Pick<Week, 'weekNumber' | 'year'>):
     return `${formatShortDate(mon)}–${formatShortDate(fri)}`;
 }
 
-export function getWeeksBetween(start: Date, end: Date, existingWeeks: Week[] = []): Week[] {
+export function inferWeekParityFromDate(dateInput: Date | string): 'odd' | 'even' {
+    const d = typeof dateInput === 'string'
+        ? (() => {
+            const [y, m, day] = dateInput.split('-').map(Number);
+            return new Date(y, (m || 1) - 1, day || 1);
+        })()
+        : dateInput;
+    const { weekNumber } = getISOWeekAndYear(d);
+    return weekNumber % 2 === 1 ? 'odd' : 'even';
+}
+
+export function getWeekTypeForNumber(weekNumber: number, weekAParity: 'odd' | 'even' = 'odd'): 'A' | 'B' {
+    const isOdd = weekNumber % 2 === 1;
+    if (weekAParity === 'odd') {
+        return isOdd ? 'A' : 'B';
+    }
+    return isOdd ? 'B' : 'A';
+}
+
+export function getWeeksBetween(
+    start: Date,
+    end: Date,
+    existingWeeks: Week[] = [],
+    options?: { weekAParity?: 'odd' | 'even' }
+): Week[] {
     const weeks: Week[] = [];
     const current = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    const parity = options?.weekAParity ?? 'odd';
 
     // Align to Monday of start week
     const day = current.getDay() || 7;
@@ -98,7 +123,7 @@ export function getWeeksBetween(start: Date, end: Date, existingWeeks: Week[] = 
                 weekNumber,
                 year,
                 isBlocked: prev ? prev.isBlocked : false,
-                weekType: prev ? prev.weekType : 'A',
+                weekType: prev ? prev.weekType : getWeekTypeForNumber(weekNumber, parity),
             });
         }
 
@@ -106,6 +131,36 @@ export function getWeeksBetween(start: Date, end: Date, existingWeeks: Week[] = 
     }
 
     return weeks;
+}
+
+export type WeekABPatternMode =
+    | 'odd-A'
+    | 'even-A'
+    | 'alternate-start-A'
+    | 'alternate-start-B'
+    | 'flip';
+
+export function applyWeekABPattern(weeks: Week[], mode: WeekABPatternMode): Week[] {
+    let altIndex = 0;
+    return weeks.map((w) => {
+        if (mode === 'odd-A') {
+            return { ...w, weekType: getWeekTypeForNumber(w.weekNumber, 'odd') };
+        }
+        if (mode === 'even-A') {
+            return { ...w, weekType: getWeekTypeForNumber(w.weekNumber, 'even') };
+        }
+        if (mode === 'flip') {
+            return { ...w, weekType: w.weekType === 'A' ? 'B' : 'A' };
+        }
+        // alternate-start-A / alternate-start-B: skip completely blocked weeks when counting school weeks
+        if (w.isBlocked) {
+            return w;
+        }
+        const startWithA = mode === 'alternate-start-A';
+        const weekType: 'A' | 'B' = (altIndex % 2 === 0) === startWithA ? 'A' : 'B';
+        altIndex++;
+        return { ...w, weekType };
+    });
 }
 
 export function isSameDay(d1: Date, d2: Date) {

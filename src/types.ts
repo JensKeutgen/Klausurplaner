@@ -2,6 +2,8 @@ export type DayOfWeek = 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Frida
 
 export const DAYS_OF_WEEK: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
+export type SubjectTimingPreference = 'normal' | 'early' | 'late';
+
 export interface ClassSchedule {
   className: string;
   gradeLevel?: string; // Stufe (e.g. "11", "BG25", "ITA24") - auto-inferred if omitted
@@ -11,9 +13,11 @@ export interface ClassSchedule {
   subjectsB?: {
     [key in DayOfWeek]: string[]; // Array of subjects for Week B
   };
-  // Optional teacher initials per day -> subject (populated by EduPage import)
+  // Optional teacher labels per day -> subject (populated by EduPage import)
   subjectTeachers?: Partial<Record<DayOfWeek, Record<string, string[]>>>;
   subjectTeachersB?: Partial<Record<DayOfWeek, Record<string, string[]>>>;
+  // Optional selected exam teacher per subject when multiple teachers teach the same subject
+  examTeacherBySubject?: Record<string, string>;
 }
 
 export interface Exam {
@@ -36,6 +40,9 @@ export interface Week {
 
 // Map of WeekId -> Day -> boolean (true if blocked globally)
 export type BlockedDays = Record<string, Record<DayOfWeek, boolean>>;
+
+// Map of WeekId -> Day -> string (holiday / block label, e.g. "Herbstferien")
+export type HolidayLabels = Record<string, Partial<Record<DayOfWeek, string>>>;
 
 // Map of ClassName -> WeekId -> Day -> boolean (true if blocked for that class)
 export type BlockedClassDays = Record<string, Record<string, Record<DayOfWeek, boolean>>>;
@@ -66,7 +73,11 @@ export interface EdupageMeta {
   subdomain?: string;
   username?: string;
   lastSyncAt?: string;
+  lastHolidaySyncAt?: string;
   selectedClassIds?: string[];
+  weekAReferenceDate?: string;
+  weekBReferenceDate?: string;
+  weekAParity?: 'odd' | 'even';
 }
 
 export interface AppState {
@@ -74,8 +85,11 @@ export interface AppState {
   weeks: Week[];
   exams: Exam[];
   blockedDays: BlockedDays;
+  holidayLabels?: HolidayLabels;
   blockedClassDays: BlockedClassDays;
   selectedSubjects: Record<string, string[]>;
+  subjectTiming?: Record<string, SubjectTimingPreference>;
+  classSubjectTiming?: Record<string, Record<string, SubjectTimingPreference>>;
   pdfSettings: PdfSettings;
   solverSettings?: SolverSettings;
   edupageMeta?: EdupageMeta;

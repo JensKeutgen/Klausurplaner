@@ -1,32 +1,83 @@
 import { useState } from 'react';
-import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, AlertCircle, ChevronUp, ChevronDown, FileText, Sliders } from 'lucide-react';
-import type { Week, PdfSettings, SolverSettings } from '../types';
-import { getWeeksBetween, getWeekDateRangeString, isSameDay, isDateInRange } from '../logic/dateUtils';
+import {
+    Calendar as CalendarIcon,
+    ChevronLeft,
+    ChevronRight,
+    FileText,
+    Sliders,
+    RefreshCw,
+    Ban,
+    CalendarCheck2,
+    Sparkles,
+} from 'lucide-react';
+import type { BlockedDays, HolidayLabels, PdfSettings, SolverSettings, Week } from '../types';
+import {
+    applyWeekABPattern,
+    getISOWeek,
+    getWeekDateRangeString,
+    getWeekDayDate,
+    getWeeksBetween,
+    isDateInRange,
+    isSameDay,
+    type WeekABPatternMode,
+} from '../logic/dateUtils';
+import { GERMAN_STATES, type GermanStateCode } from '../logic/holidays';
 
 interface ConfigSectionProps {
+    section?: 'period' | 'rules' | 'all';
     weeks: Week[];
     onUpdateWeeks: (weeks: Week[]) => void;
+    blockedDays: BlockedDays;
+    holidayLabels?: HolidayLabels;
+    weekAParity?: 'odd' | 'even';
+    onUpdateWeekAParity?: (parity: 'odd' | 'even') => void;
+    onApplyStateHolidays?: (state: GermanStateCode) => void;
+    onSyncEdupageCalendar?: () => Promise<void>;
+    edupageSyncLoading?: boolean;
+    edupageSyncMessage?: string | null;
+    bridgeOnline?: boolean;
     pdfSettings: PdfSettings;
     onUpdatePdfSettings: (settings: PdfSettings) => void;
     solverSettings: SolverSettings;
     onUpdateSolverSettings: (settings: SolverSettings) => void;
-    isCollapsed: boolean;
-    onToggle: () => void;
 }
 
 export function ConfigSection({
+    section = 'all',
     weeks,
     onUpdateWeeks,
+    blockedDays,
+    holidayLabels = {},
+    weekAParity = 'odd',
+    onUpdateWeekAParity,
+    onApplyStateHolidays,
+    onSyncEdupageCalendar,
+    edupageSyncLoading = false,
+    edupageSyncMessage = null,
+    bridgeOnline = false,
     pdfSettings,
     onUpdatePdfSettings,
     solverSettings,
     onUpdateSolverSettings,
-    isCollapsed,
-    onToggle,
 }: ConfigSectionProps) {
-    const [currentMonth, setCurrentMonth] = useState(new Date());
-    const [selectionStart, setSelectionStart] = useState<Date | null>(null);
-    const [selectionEnd, setSelectionEnd] = useState<Date | null>(null);
+    const [currentMonth, setCurrentMonth] = useState(() => {
+        if (weeks.length > 0) {
+            return getWeekDayDate(weeks[0], 0);
+        }
+        return new Date();
+    });
+    const [selectionStart, setSelectionStart] = useState<Date | null>(() =>
+        weeks.length > 0 ? getWeekDayDate(weeks[0], 0) : null
+    );
+    const [selectionEnd, setSelectionEnd] = useState<Date | null>(() =>
+        weeks.length > 0 ? getWeekDayDate(weeks[weeks.length - 1], 4) : null
+    );
+    const [selectedState, setSelectedState] = useState<GermanStateCode>('NW');
+
+    const updateWeeks = (start: Date, end: Date) => {
+        const newWeeks = getWeeksBetween(start, end, weeks, { weekAParity });
+        onUpdateWeeks(newWeeks);
+    };
 
     const handleDateClick = (date: Date) => {
         if (!selectionStart || (selectionStart && selectionEnd)) {
@@ -42,12 +93,6 @@ export function ConfigSection({
                 updateWeeks(selectionStart, date);
             }
         }
-    };
-
-    const updateWeeks = (start: Date, end: Date) => {
-        // Preserve existing Week IDs, isBlocked and weekType for overlapping ISO weeks
-        const newWeeks = getWeeksBetween(start, end, weeks);
-        onUpdateWeeks(newWeeks);
     };
 
     const nextMonth = () => {
@@ -70,10 +115,14 @@ export function ConfigSection({
         onUpdateWeeks(weeks.map((w) => (w.id === id ? { ...w, weekType: w.weekType === 'A' ? 'B' : 'A' } : w)));
     };
 
-    const renderMonth = (offset: number) => {
-        const monthDate = new Date(currentMonth);
-        monthDate.setMonth(monthDate.getMonth() + offset);
+    const handlePattern = (mode: WeekABPatternMode) => {
+        if (mode === 'odd-A') onUpdateWeekAParity?.('odd');
+        if (mode === 'even-A') onUpdateWeekAParity?.('even');
+        onUpdateWeeks(applyWeekABPattern(weeks, mode));
+    };
 
+    const renderMonth = (offset: number) => {
+        const monthDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + offset, 1);
         const year = monthDate.getFullYear();
         const month = monthDate.getMonth();
 
@@ -83,120 +132,295 @@ export function ConfigSection({
         let startDay = firstDay.getDay() - 1;
         if (startDay === -1) startDay = 6;
 
-        const days = [];
-        for (let i = 0; i < startDay; i++) {
-            days.push(<div key={`empty-${i}`} />);
-        }
-        for (let d = 1; d <= daysInMonth; d++) {
-            const date = new Date(year, month, d);
-            const isSelected = isDateInRange(date, selectionStart, selectionEnd);
-            const isStart = selectionStart && isSameDay(date, selectionStart);
-            const isEnd = selectionEnd && isSameDay(date, selectionEnd);
+        // Build rows of 7 cells so each week row displays its exact ISO KW on the left
+        const totalSlots = Math.ceil((startDay + daysInMonth) / 7) * 7;
+        const rows: { kw: number; cells: Array<Date | null> }[] = [];
 
-            days.push(
-                <div
-                    key={d}
-                    onClick={() => handleDateClick(date)}
-                    style={{
-                        padding: '8px',
-                        textAlign: 'center',
-                        cursor: 'pointer',
-                        borderRadius: '50%',
-                        background: isStart || isEnd ? 'var(--accent-primary)' : isSelected ? 'rgba(59, 130, 246, 0.2)' : 'transparent',
-                        color: isStart || isEnd ? 'white' : 'inherit',
-                        fontWeight: isStart || isEnd ? 'bold' : 'normal',
-                        fontSize: '0.9rem',
-                    }}
-                    className="hover-opacity"
-                >
-                    {d}
-                </div>
-            );
+        for (let rowStart = 0; rowStart < totalSlots; rowStart += 7) {
+            const cells: Array<Date | null> = [];
+            let sampleDate: Date | null = null;
+            for (let col = 0; col < 7; col++) {
+                const dayNum = rowStart + col - startDay + 1;
+                if (dayNum >= 1 && dayNum <= daysInMonth) {
+                    const d = new Date(year, month, dayNum);
+                    cells.push(d);
+                    if (!sampleDate) sampleDate = d;
+                } else {
+                    cells.push(null);
+                }
+            }
+            const kw = sampleDate ? getISOWeek(sampleDate) : 0;
+            rows.push({ kw, cells });
         }
 
         return (
-            <div style={{ width: '250px' }}>
-                <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem', fontWeight: 600 }}>
+            <div style={{ width: '278px', background: 'var(--bg-panel)', padding: '0.75rem', borderRadius: '10px', border: '1px solid var(--border-subtle)' }}>
+                <div style={{ textAlign: 'center', marginBottom: '0.6rem', fontWeight: 700, fontSize: '0.9rem' }}>
                     {monthDate.toLocaleString('de-DE', { month: 'long', year: 'numeric' })}
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px', textAlign: 'center', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                    <div>Mo</div><div>Di</div><div>Mi</div><div>Do</div><div>Fr</div><div>Sa</div><div>So</div>
+                <div
+                    style={{
+                        display: 'grid',
+                        gridTemplateColumns: '34px repeat(7, 1fr)',
+                        gap: '3px',
+                        textAlign: 'center',
+                        fontSize: '0.72rem',
+                        fontWeight: 600,
+                        color: 'var(--text-muted)',
+                        marginBottom: '4px',
+                    }}
+                >
+                    <div>KW</div>
+                    <div>Mo</div>
+                    <div>Di</div>
+                    <div>Mi</div>
+                    <div>Do</div>
+                    <div>Fr</div>
+                    <div>Sa</div>
+                    <div>So</div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px' }}>
-                    {days}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    {rows.map((row, rIdx) => (
+                        <div
+                            key={`${year}-${month}-r${rIdx}`}
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: '34px repeat(7, 1fr)',
+                                gap: '3px',
+                                alignItems: 'center',
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                    fontFamily: 'monospace',
+                                    color: 'var(--accent-primary)',
+                                    background: 'var(--accent-soft)',
+                                    borderRadius: '4px',
+                                    textAlign: 'center',
+                                    padding: '3px 2px',
+                                }}
+                                title={`Kalenderwoche ${row.kw}`}
+                            >
+                                {row.kw}
+                            </div>
+                            {row.cells.map((date, cIdx) => {
+                                if (!date) return <div key={`e-${cIdx}`} />;
+                                const isSelected = isDateInRange(date, selectionStart, selectionEnd);
+                                const isStart = selectionStart && isSameDay(date, selectionStart);
+                                const isEnd = selectionEnd && isSameDay(date, selectionEnd);
+                                const isWeekend = cIdx >= 5;
+
+                                return (
+                                    <button
+                                        key={date.getDate()}
+                                        type="button"
+                                        onClick={() => handleDateClick(date)}
+                                        style={{
+                                            padding: '5px 0',
+                                            textAlign: 'center',
+                                            border: 'none',
+                                            borderRadius: '6px',
+                                            background: isStart || isEnd
+                                                ? 'var(--accent-primary)'
+                                                : isSelected
+                                                    ? 'var(--accent-soft)'
+                                                    : 'transparent',
+                                            color: isStart || isEnd
+                                                ? '#ffffff'
+                                                : isWeekend
+                                                    ? 'var(--text-muted)'
+                                                    : 'var(--text-primary)',
+                                            fontWeight: isStart || isEnd ? 700 : 500,
+                                            fontSize: '0.8rem',
+                                        }}
+                                        className="hover-opacity"
+                                    >
+                                        {date.getDate()}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    ))}
                 </div>
             </div>
         );
     };
 
-    return (
-        <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem', background: 'var(--bg-card)', borderRadius: '8px', boxShadow: 'var(--shadow-md)', transition: 'all 0.3s' }}>
-            <div
-                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isCollapsed ? 0 : '1rem', cursor: 'pointer' }}
-                onClick={onToggle}
-            >
-                <h2 style={{ fontSize: '1.25rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-                    <CalendarIcon size={24} style={{ color: 'var(--accent-primary)' }} />
-                    Klausurzeitraum & Solver
-                </h2>
-                <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
-                    {isCollapsed ? <ChevronDown size={20} /> : <ChevronUp size={20} />}
-                </button>
-            </div>
+    const showPeriod = section === 'all' || section === 'period';
+    const showRules = section === 'all' || section === 'rules';
 
-            {!isCollapsed && (
-                <>
-                    <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '1.5rem' }}>
-                        <button onClick={(e) => { e.stopPropagation(); prevMonth(); }} style={{ background: 'none', border: 'none', color: 'var(--text-primary)' }}><ChevronLeft /></button>
-                        {renderMonth(0)}
-                        {renderMonth(1)}
-                        <button onClick={(e) => { e.stopPropagation(); nextMonth(); }} style={{ background: 'none', border: 'none', color: 'var(--text-primary)' }}><ChevronRight /></button>
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            {showPeriod && (
+                <div className="ui-card" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+                        <div>
+                            <h3 style={{ fontSize: '1.05rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <CalendarIcon size={19} color="var(--accent-primary)" />
+                                Klausurzeitraum, Kalenderwochen & Ferien
+                            </h3>
+                            <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                Start- und Enddatum anklicken – die <strong>KW</strong> steht links neben jeder Woche.
+                            </p>
+                        </div>
+                        {weeks.length > 0 && (
+                            <span
+                                style={{
+                                    fontSize: '0.78rem',
+                                    fontWeight: 600,
+                                    padding: '4px 10px',
+                                    borderRadius: '999px',
+                                    background: 'var(--accent-soft)',
+                                    color: 'var(--accent-primary)',
+                                }}
+                            >
+                                {weeks.length} Wochen (KW {weeks[0].weekNumber} – KW {weeks[weeks.length - 1].weekNumber})
+                            </span>
+                        )}
                     </div>
 
-                    <div style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-                        gap: '1.5rem',
-                        alignItems: 'start',
-                        borderTop: '1px solid var(--border-color)',
-                        paddingTop: '1rem',
-                    }}>
-                        {/* Selected Weeks List */}
-                        <div>
-                            <h4 style={{ marginBottom: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase', fontSize: '0.8rem', letterSpacing: '0.5px', fontWeight: 600 }}>
-                                Ausgewählte Wochen
-                            </h4>
-                            {weeks.length === 0 ? (
-                                <p style={{ color: 'var(--text-secondary)' }}>Wähle ein Start- und Enddatum oben aus.</p>
-                            ) : (
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem' }}>
-                                    {weeks.map((week) => (
+                    {/* Month Pickers with KW column */}
+                    <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
+                        <button type="button" className="ui-btn" style={{ padding: '6px' }} onClick={prevMonth} title="Vorheriger Monat">
+                            <ChevronLeft size={16} />
+                        </button>
+                        {renderMonth(0)}
+                        {renderMonth(1)}
+                        <button type="button" className="ui-btn" style={{ padding: '6px' }} onClick={nextMonth} title="Nächster Monat">
+                            <ChevronRight size={16} />
+                        </button>
+                    </div>
+
+                    {/* Holiday + A/B Automation Bar */}
+                    <div
+                        style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: '0.6rem',
+                            alignItems: 'center',
+                            padding: '0.75rem',
+                            borderRadius: '10px',
+                            background: 'var(--bg-panel)',
+                            border: '1px solid var(--border-subtle)',
+                        }}
+                    >
+                        {bridgeOnline && onSyncEdupageCalendar && (
+                            <button
+                                type="button"
+                                className="ui-btn ui-btn-primary"
+                                onClick={onSyncEdupageCalendar}
+                                disabled={edupageSyncLoading || weeks.length === 0}
+                                title="Lädt schulfreie Tage/Ferien und A/B-Wochentypen direkt für den Zeitraum aus EduPage"
+                            >
+                                <RefreshCw size={14} />
+                                {edupageSyncLoading ? 'Synchronisiere EduPage...' : 'Ferien & A/B-Wochen aus EduPage holen'}
+                            </button>
+                        )}
+
+                        {onApplyStateHolidays && (
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                <select
+                                    className="ui-input"
+                                    style={{ width: 'auto', fontSize: '0.8rem', padding: '5px 8px' }}
+                                    value={selectedState}
+                                    onChange={(e) => setSelectedState(e.target.value as GermanStateCode)}
+                                    title="Bundesland für gesetzliche Feiertage"
+                                >
+                                    {GERMAN_STATES.map((st) => (
+                                        <option key={st.code} value={st.code}>
+                                            {st.label}
+                                        </option>
+                                    ))}
+                                </select>
+                                <button
+                                    type="button"
+                                    className="ui-btn"
+                                    onClick={() => onApplyStateHolidays(selectedState)}
+                                    disabled={weeks.length === 0}
+                                >
+                                    <CalendarCheck2 size={14} />
+                                    Feiertage sperren
+                                </button>
+                            </div>
+                        )}
+
+                        <div style={{ marginLeft: 'auto', display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginRight: '4px' }}>A/B-Muster:</span>
+                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('odd-A')}>
+                                Ungerade KW = A
+                            </button>
+                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('even-A')}>
+                                Gerade KW = A
+                            </button>
+                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('alternate-start-A')}>
+                                Abwechselnd
+                            </button>
+                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('flip')}>
+                                Tauschen
+                            </button>
+                        </div>
+                    </div>
+
+                    {edupageSyncMessage && (
+                        <div
+                            style={{
+                                fontSize: '0.82rem',
+                                padding: '0.55rem 0.85rem',
+                                borderRadius: '8px',
+                                background: 'var(--accent-success-soft)',
+                                color: 'var(--text-primary)',
+                                border: '1px solid var(--accent-success)',
+                            }}
+                        >
+                            {edupageSyncMessage}
+                        </div>
+                    )}
+
+                    {/* Week Cards */}
+                    <div>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                            Wochen im Zeitraum (Klick auf A/B wechselt den Wochentyp)
+                        </div>
+                        {weeks.length === 0 ? (
+                            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Wähle oben ein Start- und Enddatum aus.</p>
+                        ) : (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(175px, 1fr))', gap: '0.5rem' }}>
+                                {weeks.map((week) => {
+                                    const blockedDayNames = Object.entries(blockedDays[week.id] || {})
+                                        .filter(([, v]) => v)
+                                        .map(([d]) => holidayLabels[week.id]?.[d as keyof typeof holidayLabels[string]] || d);
+                                    const allDaysBlocked = blockedDayNames.length >= 5;
+
+                                    return (
                                         <div
                                             key={week.id}
                                             style={{
-                                                padding: '0.5rem 0.75rem',
-                                                background: week.isBlocked ? 'var(--bg-app)' : 'var(--bg-panel)',
-                                                border: `1px solid ${week.isBlocked ? 'var(--accent-danger)' : 'var(--border-color)'}`,
-                                                borderRadius: '6px',
+                                                padding: '0.55rem 0.7rem',
+                                                background: week.isBlocked || allDaysBlocked ? 'var(--holiday-bg)' : 'var(--bg-panel)',
+                                                border: `1px solid ${week.isBlocked ? 'var(--accent-danger)' : allDaysBlocked ? 'var(--holiday-border)' : 'var(--border-color)'}`,
+                                                borderRadius: '8px',
                                                 display: 'flex',
                                                 alignItems: 'center',
-                                                gap: '8px',
-                                                opacity: week.isBlocked ? 0.7 : 1,
+                                                justifyContent: 'space-between',
+                                                gap: '6px',
                                             }}
                                         >
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>KW {week.weekNumber}</span>
+                                                    <span style={{ fontWeight: 700, fontSize: '0.88rem' }}>KW {week.weekNumber}</span>
                                                     <button
-                                                        onClick={(e) => { e.stopPropagation(); toggleWeekType(week.id); }}
+                                                        type="button"
+                                                        onClick={() => toggleWeekType(week.id)}
                                                         style={{
                                                             fontSize: '0.7rem',
-                                                            padding: '1px 6px',
-                                                            borderRadius: '4px',
-                                                            background: week.weekType === 'A' ? 'var(--accent-primary)' : '#8b5cf6',
-                                                            color: 'white',
+                                                            padding: '1px 7px',
+                                                            borderRadius: '5px',
+                                                            background: week.weekType === 'A' ? 'var(--accent-primary)' : 'var(--accent-purple)',
+                                                            color: '#fff',
                                                             border: 'none',
-                                                            cursor: 'pointer',
+                                                            fontWeight: 700,
                                                         }}
                                                         title="Wochentyp umschalten (A/B)"
                                                     >
@@ -206,127 +430,145 @@ export function ConfigSection({
                                                 <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
                                                     {getWeekDateRangeString(week)}
                                                 </span>
-                                                <span style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', fontFamily: 'monospace', opacity: 0.85 }} title="Wochen-ID">
-                                                    ID: {week.id}
+                                                <span style={{ fontSize: '0.67rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                                                    {week.id}
+                                                    {blockedDayNames.length > 0 ? ` · ${blockedDayNames.length} frei` : ''}
                                                 </span>
                                             </div>
                                             <button
-                                                onClick={(e) => { e.stopPropagation(); toggleBlockWeek(week.id); }}
-                                                title={week.isBlocked ? 'Woche freigeben' : 'Woche komplett blockieren'}
-                                                style={{ background: 'none', border: 'none', color: week.isBlocked ? 'var(--accent-danger)' : 'var(--text-secondary)', padding: '4px' }}
+                                                type="button"
+                                                onClick={() => toggleBlockWeek(week.id)}
+                                                title={week.isBlocked ? 'Woche freigeben' : 'Ganze Woche sperren'}
+                                                style={{
+                                                    background: week.isBlocked ? 'var(--accent-danger-soft)' : 'transparent',
+                                                    border: 'none',
+                                                    borderRadius: '6px',
+                                                    color: week.isBlocked ? 'var(--accent-danger)' : 'var(--text-muted)',
+                                                    padding: '5px',
+                                                    display: 'flex',
+                                                }}
                                             >
-                                                <AlertCircle size={16} />
+                                                <Ban size={15} />
                                             </button>
                                         </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Solver Settings */}
-                        <div>
-                            <h4 style={{ marginBottom: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase', fontSize: '0.8rem', letterSpacing: '0.5px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <Sliders size={15} />
-                                Smart-Solver Regeln
-                            </h4>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', fontSize: '0.85rem' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-                                    <label>Max. Klausuren / Woche / Klasse</label>
-                                    <input
-                                        type="number"
-                                        min={1}
-                                        max={5}
-                                        value={solverSettings.maxExamsPerWeek}
-                                        onChange={(e) =>
-                                            onUpdateSolverSettings({
-                                                ...solverSettings,
-                                                maxExamsPerWeek: Math.max(1, Math.min(5, Number(e.target.value) || 2)),
-                                            })
-                                        }
-                                        style={{ width: '56px', padding: '4px 6px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-app)', color: 'var(--text-primary)', textAlign: 'center' }}
-                                    />
-                                </div>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={solverSettings.preferSameGradeSubjectSameWeek}
-                                        onChange={(e) =>
-                                            onUpdateSolverSettings({ ...solverSettings, preferSameGradeSubjectSameWeek: e.target.checked })
-                                        }
-                                    />
-                                    Gleiches Fach & Stufe in gleiche Woche
-                                </label>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={solverSettings.avoidConsecutiveDays}
-                                        onChange={(e) =>
-                                            onUpdateSolverSettings({ ...solverSettings, avoidConsecutiveDays: e.target.checked })
-                                        }
-                                    />
-                                    Aufeinanderfolgende Tage vermeiden
-                                </label>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={solverSettings.keepPinnedOnDistribute}
-                                        onChange={(e) =>
-                                            onUpdateSolverSettings({ ...solverSettings, keepPinnedOnDistribute: e.target.checked })
-                                        }
-                                    />
-                                    Gepinnte Klausuren bei Generate behalten
-                                </label>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={solverSettings.avoidTeacherCollisions}
-                                        onChange={(e) =>
-                                            onUpdateSolverSettings({ ...solverSettings, avoidTeacherCollisions: e.target.checked })
-                                        }
-                                    />
-                                    Lehrkraft-Überschneidungen vermeiden
-                                </label>
+                                    );
+                                })}
                             </div>
-                        </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
-                        {/* PDF Settings */}
-                        <div>
-                            <h4 style={{ marginBottom: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase', fontSize: '0.8rem', letterSpacing: '0.5px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <FileText size={15} />
-                                PDF Einstellungen
-                            </h4>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                                <div>
-                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.82rem', fontWeight: 500 }}>Titel</label>
-                                    <input
-                                        type="text"
-                                        value={pdfSettings.title}
-                                        onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, title: e.target.value })}
-                                        style={{ width: '100%', padding: '7px 8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-app)', color: 'var(--text-primary)' }}
-                                    />
-                                </div>
-                                <div>
-                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.82rem', fontWeight: 500 }}>Nachschreibetermin (Text)</label>
-                                    <input
-                                        type="text"
-                                        value={pdfSettings.makeupExamInfo}
-                                        onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, makeupExamInfo: e.target.value })}
-                                        style={{ width: '100%', padding: '7px 8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-app)', color: 'var(--text-primary)' }}
-                                    />
-                                </div>
-                                <div>
-                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.82rem', fontWeight: 500 }}>Noten eintragen (Datum)</label>
-                                    <input
-                                        type="text"
-                                        value={pdfSettings.gradesDueDate}
-                                        onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, gradesDueDate: e.target.value })}
-                                        style={{ width: '100%', padding: '7px 8px', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-app)', color: 'var(--text-primary)' }}
-                                    />
-                                </div>
+            {showRules && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.25rem' }}>
+                    {/* Solver Settings Card */}
+                    <div className="ui-card" style={{ padding: '1.25rem' }}>
+                        <h3 style={{ fontSize: '1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.85rem' }}>
+                            <Sliders size={18} color="var(--accent-primary)" />
+                            Smart-Solver Regeln
+                        </h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.7rem', fontSize: '0.86rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                <label style={{ fontWeight: 500 }}>Max. Klausuren / Woche / Klasse</label>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    max={5}
+                                    className="ui-input"
+                                    style={{ width: '64px', textAlign: 'center', padding: '4px 6px' }}
+                                    value={solverSettings.maxExamsPerWeek}
+                                    onChange={(e) =>
+                                        onUpdateSolverSettings({
+                                            ...solverSettings,
+                                            maxExamsPerWeek: Math.max(1, Math.min(5, Number(e.target.value) || 2)),
+                                        })
+                                    }
+                                />
+                            </div>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={solverSettings.preferSameGradeSubjectSameWeek}
+                                    onChange={(e) =>
+                                        onUpdateSolverSettings({ ...solverSettings, preferSameGradeSubjectSameWeek: e.target.checked })
+                                    }
+                                />
+                                Gleiches Fach & gleiche Stufe in dieselbe Woche (ohne Tageskopplung)
+                            </label>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={solverSettings.avoidConsecutiveDays}
+                                    onChange={(e) =>
+                                        onUpdateSolverSettings({ ...solverSettings, avoidConsecutiveDays: e.target.checked })
+                                    }
+                                />
+                                Aufeinanderfolgende Klausurtage einer Klasse vermeiden
+                            </label>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={solverSettings.keepPinnedOnDistribute}
+                                    onChange={(e) =>
+                                        onUpdateSolverSettings({ ...solverSettings, keepPinnedOnDistribute: e.target.checked })
+                                    }
+                                />
+                                Gepinnte Klausuren beim Neu-Verteilen beibehalten
+                            </label>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={solverSettings.avoidTeacherCollisions}
+                                    onChange={(e) =>
+                                        onUpdateSolverSettings({ ...solverSettings, avoidTeacherCollisions: e.target.checked })
+                                    }
+                                />
+                                Lehrkraft-Überschneidungen am selben Tag vermeiden
+                            </label>
+                        </div>
+                        <div style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)', fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <Sparkles size={14} color="var(--accent-primary)" />
+                            Berücksichtigt auch gewählte Prüfungs-Lehrkräfte und „Früh / Spät“-Wünsche.
+                        </div>
+                    </div>
+
+                    {/* PDF Settings Card */}
+                    <div className="ui-card" style={{ padding: '1.25rem' }}>
+                        <h3 style={{ fontSize: '1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.85rem' }}>
+                            <FileText size={18} color="var(--accent-primary)" />
+                            PDF-Export Einstellungen
+                        </h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                            <div>
+                                <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.82rem', fontWeight: 600 }}>Titel im PDF</label>
+                                <input
+                                    type="text"
+                                    className="ui-input"
+                                    value={pdfSettings.title}
+                                    onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, title: e.target.value })}
+                                />
+                            </div>
+                            <div>
+                                <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.82rem', fontWeight: 600 }}>Nachschreibetermin (Fußzeile)</label>
+                                <input
+                                    type="text"
+                                    className="ui-input"
+                                    value={pdfSettings.makeupExamInfo}
+                                    onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, makeupExamInfo: e.target.value })}
+                                />
+                            </div>
+                            <div>
+                                <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.82rem', fontWeight: 600 }}>Noten eintragen (Datum)</label>
+                                <input
+                                    type="text"
+                                    className="ui-input"
+                                    value={pdfSettings.gradesDueDate}
+                                    onChange={(e) => onUpdatePdfSettings({ ...pdfSettings, gradesDueDate: e.target.value })}
+                                />
                             </div>
                         </div>
                     </div>
-                </>
+                </div>
             )}
         </div>
     );

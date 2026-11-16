@@ -223,6 +223,331 @@ def _monday_of_date(date_str: str) -> datetime.date:
     return d - datetime.timedelta(days=d.weekday())
 
 
+def _build_subject_lookup(edupage: Any, use_short: bool) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    try:
+        subjects = edupage.get_subjects() or []
+        for s in subjects:
+            sid = getattr(s, "subject_id", None)
+            if sid is None:
+                continue
+            short_n = getattr(s, "short", None)
+            full_n = getattr(s, "name", None)
+            label = (short_n or full_n) if use_short else (full_n or short_n)
+            if label:
+                lookup[str(sid)] = str(label).strip()
+    except Exception:
+        pass
+    return lookup
+
+
+def _fetch_range_ttitems(
+    edupage: Any,
+    class_id: int | str,
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> list[dict[str, Any]] | None:
+    """Queries EduPage currentttGetData for a full date range in chunks."""
+    try:
+        school_year = edupage.get_school_year()
+    except Exception:
+        return None
+
+    url = f"https://{edupage.subdomain}.edupage.org/timetable/server/currenttt.js?__func=curentttGetData"
+    all_items: list[dict[str, Any]] = []
+    chunk_start = start_date
+    while chunk_start <= end_date:
+        chunk_end = min(end_date, chunk_start + datetime.timedelta(days=27))
+        payload = {
+            "__args": [
+                None,
+                {
+                    "year": school_year,
+                    "datefrom": chunk_start.strftime("%Y-%m-%d"),
+                    "dateto": chunk_end.strftime("%Y-%m-%d"),
+                    "table": "classes",
+                    "id": str(class_id),
+                    "showColors": True,
+                    "showIgroupsInClasses": True,
+                    "showOrig": True,
+                    "log_module": "CurrentTTView",
+                },
+            ],
+            "__gsh": edupage.gsec_hash,
+        }
+        try:
+            resp = edupage.session.post(url, json=payload)
+            data = resp.json()
+            r_obj = data.get("r") if isinstance(data, dict) else None
+            if not isinstance(r_obj, dict) or r_obj.get("error") is not None:
+                return None
+            ttitems = r_obj.get("ttitems") or []
+            if isinstance(ttitems, list):
+                for item in ttitems:
+                    if isinstance(item, dict):
+                        all_items.append(item)
+        except Exception:
+            return None
+        chunk_start = chunk_end + datetime.timedelta(days=1)
+
+    return all_items
+
+
+def _collect_timeline_holidays(
+    edupage: Any,
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> dict[str, str]:
+    """Extracts holiday / free-day labels from EduPage timeline events if available."""
+    labels_by_date: dict[str, str] = {}
+    events: list[Any] = []
+
+    for fetcher in (
+        lambda: edupage.get_notifications() or [],
+        lambda: edupage.get_notifications_history(start_date - datetime.timedelta(days=14)) or [],
+    ):
+        try:
+            events.extend(fetcher())
+        except Exception:
+            pass
+
+    holiday_types = {"holiday", "freeday", "sholiday"}
+    for ev in events:
+        if getattr(ev, "is_removed", False):
+            continue
+        ev_type = getattr(ev, "event_type", None)
+        ev_type_val = getattr(ev_type, "value", str(ev_type or "")).lower()
+        text = str(getattr(ev, "text", "") or "").strip()
+        add_data = getattr(ev, "additional_data", None)
+        is_holiday_type = ev_type_val in holiday_types or (
+            ev_type_val == "ttcancel" and bool(re.search(r"ferien|feiertag|schulfrei|holiday", text, re.I))
+        )
+        if not is_holiday_type:
+            continue
+
+        label = text.splitlines()[0].strip()[:48] if text else "Ferien / Schulfrei"
+        dates_covered: list[datetime.date] = []
+        if isinstance(add_data, dict):
+            df = add_data.get("datefrom") or add_data.get("dateFrom") or add_data.get("date")
+            dt = add_data.get("dateto") or add_data.get("dateTo") or df
+            if isinstance(df, str):
+                try:
+                    d1 = datetime.date.fromisoformat(df[:10])
+                    d2 = datetime.date.fromisoformat(str(dt)[:10]) if dt else d1
+                    cur = max(start_date, d1)
+                    limit = min(end_date, d2)
+                    while cur <= limit:
+                        dates_covered.append(cur)
+                        cur += datetime.timedelta(days=1)
+                except Exception:
+                    pass
+
+        if not dates_covered:
+            ts = getattr(ev, "timestamp", None) or getattr(ev, "event_time", None)
+            if isinstance(ts, datetime.datetime):
+                d = ts.date()
+                if start_date <= d <= end_date:
+                    dates_covered.append(d)
+
+        for d in dates_covered:
+            if d.weekday() < 5:
+                labels_by_date.setdefault(d.isoformat(), label)
+
+    return labels_by_date
+
+
+def _sync_calendar_from_edupage(
+    edupage: Any,
+    class_objs: list[Any],
+    weeks_payload: list[dict[str, Any]],
+    ref_schedules: list[dict[str, Any]],
+    use_short: bool,
+) -> dict[str, Any]:
+    if not weeks_payload or not class_objs:
+        return {"blockedDays": {}, "holidayLabels": {}, "weekTypes": {}, "detectedHolidayCount": 0}
+
+    ref_by_name: dict[str, dict[str, Any]] = {}
+    for s in ref_schedules:
+        if isinstance(s, dict) and s.get("className"):
+            ref_by_name[str(s["className"])] = s
+
+    # Pick up to 3 reference classes (prefer ones that also have A/B schedules in state)
+    ordered_objs: list[Any] = []
+    for cls_obj in class_objs:
+        cname = str(getattr(cls_obj, "name", getattr(cls_obj, "short", "")))
+        if cname in ref_by_name:
+            ordered_objs.append(cls_obj)
+    for cls_obj in class_objs:
+        if cls_obj not in ordered_objs:
+            ordered_objs.append(cls_obj)
+    sampled_objs = ordered_objs[:3]
+
+    parsed_weeks: list[tuple[str, datetime.date, datetime.date]] = []
+    for w in weeks_payload:
+        wid = str(w.get("id") or "")
+        s_str = str(w.get("startDate") or "")
+        e_str = str(w.get("endDate") or "")
+        if s_str and e_str and wid:
+            parsed_weeks.append((wid, datetime.date.fromisoformat(s_str), datetime.date.fromisoformat(e_str)))
+            continue
+        year_val = w.get("year")
+        wn_val = w.get("weekNumber")
+        if wid and year_val is not None and wn_val is not None:
+            try:
+                y_int = int(year_val)
+                wn_int = int(wn_val)
+                parsed_weeks.append(
+                    (
+                        wid,
+                        datetime.date.fromisocalendar(y_int, wn_int, 1),
+                        datetime.date.fromisocalendar(y_int, wn_int, 5),
+                    )
+                )
+            except Exception:
+                continue
+
+    if not parsed_weeks:
+        return {"blockedDays": {}, "holidayLabels": {}, "weekTypes": {}, "detectedHolidayCount": 0, "activeSchoolDaysFound": 0}
+
+    min_date = min(s for _, s, _ in parsed_weeks)
+    max_date = max(e for _, _, e in parsed_weeks)
+
+    subject_lookup = _build_subject_lookup(edupage, use_short)
+    timeline_labels = _collect_timeline_holidays(edupage, min_date, max_date)
+
+    # Track regular lesson count & subjects per date and class
+    regular_count_by_date: dict[str, int] = {}
+    event_label_by_date: dict[str, str] = {}
+    # date_iso -> class_name -> set of subject labels
+    subjects_by_date_cls: dict[str, dict[str, set[str]]] = {}
+    used_range_query = False
+
+    for cls_obj in sampled_objs:
+        cname = str(getattr(cls_obj, "name", getattr(cls_obj, "short", "")))
+        cid = getattr(cls_obj, "class_id", getattr(cls_obj, "id", None))
+        if cid is None:
+            continue
+        items = _fetch_range_ttitems(edupage, cid, min_date, max_date)
+        if items is None:
+            continue
+        # Check if range query actually includes per-item dates
+        has_date_field = any(isinstance(it.get("date"), str) and len(it.get("date", "")) >= 10 for it in items)
+        if items and not has_date_field:
+            continue
+
+        used_range_query = True
+        for it in items:
+            d_raw = it.get("date")
+            if not isinstance(d_raw, str) or len(d_raw) < 10:
+                continue
+            d_iso = d_raw[:10]
+            l_type = str(it.get("type") or "")
+            is_removed = bool(it.get("removed"))
+            is_event = l_type in ("event", "out") or bool(it.get("main"))
+            is_cancelled = is_removed or l_type in ("absent", "")
+
+            if is_event and d_iso not in event_label_by_date:
+                flags = it.get("flags") if isinstance(it.get("flags"), dict) else {}
+                ev_name = (
+                    (flags.get("event") or {}).get("name")
+                    if isinstance(flags.get("event"), dict)
+                    else None
+                ) or it.get("name")
+                if isinstance(ev_name, str) and ev_name.strip():
+                    if re.search(r"ferien|feiertag|frei|holiday|bewegl|ausfall|unterrichtsfrei", ev_name, re.I):
+                        event_label_by_date[d_iso] = ev_name.strip()[:48]
+
+            if is_cancelled or is_event:
+                continue
+
+            subj_id = it.get("subjectid")
+            if not subj_id:
+                continue
+
+            regular_count_by_date[d_iso] = regular_count_by_date.get(d_iso, 0) + 1
+            subj_label = subject_lookup.get(str(subj_id))
+            if subj_label:
+                subjects_by_date_cls.setdefault(d_iso, {}).setdefault(cname, set()).add(subj_label)
+
+    # Fallback if range query didn't expose item dates: sample per day for first reference class
+    if not used_range_query and sampled_objs:
+        ref_cls = sampled_objs[0]
+        ref_name = str(getattr(ref_cls, "name", getattr(ref_cls, "short", "")))
+        cur = min_date
+        while cur <= max_date:
+            if cur.weekday() < 5:
+                d_iso = cur.isoformat()
+                try:
+                    tt = edupage.get_timetable(ref_cls, cur)
+                    lessons = getattr(tt, "lessons", None) or []
+                    for lesson in lessons:
+                        if getattr(lesson, "is_cancelled", False) or getattr(lesson, "is_event", False):
+                            cur_txt = str(getattr(lesson, "curriculum", "") or "")
+                            if cur_txt and re.search(r"ferien|feiertag|frei|holiday", cur_txt, re.I):
+                                event_label_by_date.setdefault(d_iso, cur_txt[:48])
+                            continue
+                        lbl = _extract_subject_label(lesson, use_short)
+                        if lbl:
+                            regular_count_by_date[d_iso] = regular_count_by_date.get(d_iso, 0) + 1
+                            subjects_by_date_cls.setdefault(d_iso, {}).setdefault(ref_name, set()).add(lbl)
+                except Exception:
+                    pass
+            cur += datetime.timedelta(days=1)
+
+    active_school_days = sum(1 for c in regular_count_by_date.values() if c > 0)
+
+    blocked_days: dict[str, dict[str, bool]] = {}
+    holiday_labels: dict[str, dict[str, str]] = {}
+    week_types: dict[str, str] = {}
+    detected_holiday_count = 0
+
+    for wid, w_start, _w_end in parsed_weeks:
+        score_a = 0
+        score_b = 0
+        has_ab_comparison = False
+
+        for idx, day_name in enumerate(DAY_NAMES):
+            d_obj = w_start + datetime.timedelta(days=idx)
+            d_iso = d_obj.isoformat()
+            reg_cnt = regular_count_by_date.get(d_iso, 0)
+            explicit_label = timeline_labels.get(d_iso) or event_label_by_date.get(d_iso)
+
+            # Treat as holiday/free day if explicitly marked OR no regular lessons while surrounding term has lessons
+            if explicit_label or (active_school_days >= 3 and reg_cnt == 0):
+                blocked_days.setdefault(wid, {})[day_name] = True
+                holiday_labels.setdefault(wid, {})[day_name] = explicit_label or "Schulfrei / Ferien"
+                detected_holiday_count += 1
+                continue
+
+            # Compare fetched subjects on this day against imported Week A & Week B schedules
+            day_cls_map = subjects_by_date_cls.get(d_iso, {})
+            for cname, actual_subjs in day_cls_map.items():
+                ref = ref_by_name.get(cname)
+                if not ref or not ref.get("subjectsB"):
+                    continue
+                subjs_a = set((ref.get("subjects") or {}).get(day_name) or [])
+                subjs_b = set((ref.get("subjectsB") or {}).get(day_name) or [])
+                if subjs_a == subjs_b:
+                    continue
+                has_ab_comparison = True
+                # Symmetric match: subjects present only in A or only in B distinguish the week strongly
+                only_a = subjs_a - subjs_b
+                only_b = subjs_b - subjs_a
+                score_a += len(actual_subjs & only_a) * 2 + len(actual_subjs & subjs_a)
+                score_b += len(actual_subjs & only_b) * 2 + len(actual_subjs & subjs_b)
+
+        if has_ab_comparison and score_a != score_b:
+            week_types[wid] = "B" if score_b > score_a else "A"
+
+    return {
+        "blockedDays": blocked_days,
+        "holidayLabels": holiday_labels,
+        "weekTypes": week_types,
+        "detectedHolidayCount": detected_holiday_count,
+        "activeSchoolDaysFound": active_school_days,
+    }
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
     server_version = "KlausurplanerBridge/1.0"
 
@@ -324,6 +649,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         if path == "/api/edupage/fetch-timetables":
             self._handle_fetch_timetables(body)
+            return
+
+        if path == "/api/edupage/sync-calendar":
+            self._handle_sync_calendar(body)
             return
 
         if path == "/api/edupage/logout":
@@ -622,14 +951,65 @@ class BridgeHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 errors.append(f"{cname}: {exc}")
 
+        week_a_parity = "odd" if (monday_a.isocalendar().week % 2 == 1) else "even"
+
         self._send_json(
             HTTPStatus.OK,
             {
                 "schedules": schedules,
                 "errors": errors,
+                "weekAParity": week_a_parity,
                 "fetchedAt": datetime.datetime.now().isoformat(),
             },
         )
+
+    def _handle_sync_calendar(self, body: dict[str, Any]) -> None:
+        if not self._ensure_edupage_available():
+            return
+
+        with SESSION.lock:
+            edupage = SESSION.edupage
+            classes_cache = list(SESSION.classes_cache)
+
+        if edupage is None:
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Bitte zuerst bei EduPage anmelden."})
+            return
+
+        weeks_payload = body.get("weeks") or []
+        if not isinstance(weeks_payload, list) or not weeks_payload:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Erwarte nicht-leere 'weeks'-Liste."})
+            return
+
+        if not classes_cache:
+            classes_cache = list(edupage.get_classes() or [])
+            with SESSION.lock:
+                SESSION.classes_cache = classes_cache
+
+        class_ids = set(str(x) for x in (body.get("classIds") or []))
+        selected_objs = []
+        for cls_obj in classes_cache:
+            cid = str(getattr(cls_obj, "class_id", getattr(cls_obj, "id", getattr(cls_obj, "name", ""))))
+            cname = str(getattr(cls_obj, "name", cid))
+            if not class_ids or cid in class_ids or cname in class_ids:
+                selected_objs.append(cls_obj)
+        if not selected_objs:
+            selected_objs = classes_cache
+
+        ref_schedules = body.get("referenceSchedules") or []
+        use_short = bool(body.get("useShortSubjects", True))
+
+        try:
+            result = _sync_calendar_from_edupage(
+                edupage,
+                selected_objs,
+                weeks_payload,
+                ref_schedules if isinstance(ref_schedules, list) else [],
+                use_short,
+            )
+            result["syncedAt"] = datetime.datetime.now().isoformat()
+            self._send_json(HTTPStatus.OK, result)
+        except Exception as exc:
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": f"Kalender-Abgleich mit EduPage fehlgeschlagen: {exc}"})
 
 
 def main() -> None:
