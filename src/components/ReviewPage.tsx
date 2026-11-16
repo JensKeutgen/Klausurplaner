@@ -10,6 +10,7 @@ import {
   type ReviewExamFeedback,
   type ReviewPlanData,
   type ReviewSubmission,
+  type Week,
 } from '../types';
 import {
   extractTeacherCodes,
@@ -23,7 +24,13 @@ import {
   submitColleagueFeedback,
   unlockReviewPlan,
 } from '../logic/reviewClient';
-import { formatShortDate, getWeekDateRangeString, getWeekDayDate } from '../logic/dateUtils';
+import {
+  formatISODate,
+  formatShortDate,
+  getISOWeek,
+  getWeekDateRangeString,
+  getWeekDayDate,
+} from '../logic/dateUtils';
 import {
   AlertCircle,
   Ban,
@@ -31,12 +38,13 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Clock,
   Lock,
   Plus,
   Send,
-  Star,
   Trash2,
   UserCheck,
   X,
@@ -84,6 +92,13 @@ interface DraftDayWish {
   resolutionNote?: string;
 }
 
+interface CalendarSlotInfo {
+  weekId: string;
+  day: DayOfWeek;
+  week: Week;
+  isGlobalBlocked: boolean;
+}
+
 export function ReviewPage({ planId }: ReviewPageProps) {
   const reviewerToken = useMemo(() => getOrCreateReviewerToken(planId), [planId]);
 
@@ -108,10 +123,19 @@ export function ReviewPage({ planId }: ReviewPageProps) {
   const [customTeacherInput, setCustomTeacherInput] = useState('');
   const [isChangingTeacher, setIsChangingTeacher] = useState(false);
 
-  // Overview calendar filter
-  const [showFullSchedule, setShowFullSchedule] = useState(true);
+  // Expandable sections:
+  // 1) Compact day calendar under "Meine Klausuren" (starts collapsed)
+  const [showDayCalendar, setShowDayCalendar] = useState(false);
+  // 2) Full overview schedule at the bottom (starts collapsed)
+  const [showFullSchedule, setShowFullSchedule] = useState(false);
   const [onlyMyClassesInOverview, setOnlyMyClassesInOverview] = useState(false);
   const [highlightMyExams, setHighlightMyExams] = useState(true);
+
+  // Mini month calendar state
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
 
   // Draft feedback state
   const [examFeedbackMap, setExamFeedbackMap] = useState<Record<string, DraftExamFeedback>>({});
@@ -200,6 +224,14 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [planId]);
 
+  // Jump mini calendar automatically to first exam week's month once plan loads
+  useEffect(() => {
+    if (!plan || plan.snapshot.weeks.length === 0) return;
+    const firstActiveWeek = plan.snapshot.weeks.find((w) => !w.isBlocked) || plan.snapshot.weeks[0];
+    const monday = getWeekDayDate(firstActiveWeek, 0);
+    setCalendarMonth(new Date(monday.getFullYear(), monday.getMonth(), 1));
+  }, [plan]);
+
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!passcode.trim()) return;
@@ -256,6 +288,63 @@ export function ReviewPage({ planId }: ReviewPageProps) {
       .filter((e) => !mySet.has(e.id))
       .sort((a, b) => a.className.localeCompare(b.className, 'de') || a.subject.localeCompare(b.subject, 'de'));
   }, [plan, myExams]);
+
+  // Lookup map: ISO date ('YYYY-MM-DD') -> slot info for the mini month calendar
+  const dateSlotMap = useMemo(() => {
+    const map = new Map<string, CalendarSlotInfo>();
+    if (!plan) return map;
+    for (const week of plan.snapshot.weeks) {
+      for (const day of DAYS_OF_WEEK) {
+        const d = getWeekDayDate(week, day);
+        const iso = formatISODate(d);
+        const isGlobalBlocked = week.isBlocked || Boolean(plan.snapshot.blockedDays[week.id]?.[day]);
+        map.set(iso, { weekId: week.id, day, week, isGlobalBlocked });
+      }
+    }
+    return map;
+  }, [plan]);
+
+  // Distinct months covered by the exam period for quick mobile month jumping
+  const planMonths = useMemo(() => {
+    if (!plan) return [];
+    const seen = new Map<string, Date>();
+    for (const week of plan.snapshot.weeks) {
+      for (const idx of [0, 4] as const) {
+        const d = getWeekDayDate(week, idx);
+        const key = `${d.getFullYear()}-${d.getMonth()}`;
+        if (!seen.has(key)) {
+          seen.set(key, new Date(d.getFullYear(), d.getMonth(), 1));
+        }
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.getTime() - b.getTime());
+  }, [plan]);
+
+  // Set of ISO dates where the colleague already has an exam assigned
+  const myExamIsoDates = useMemo(() => {
+    const set = new Set<string>();
+    if (!plan) return set;
+    for (const exam of myExams) {
+      if (!exam.assignedWeekId || !exam.assignedDay) continue;
+      const week = plan.snapshot.weeks.find((w) => w.id === exam.assignedWeekId);
+      if (!week) continue;
+      set.add(formatISODate(getWeekDayDate(week, exam.assignedDay)));
+    }
+    return set;
+  }, [plan, myExams]);
+
+  const sortedDayWishes = useMemo(() => {
+    if (!plan) return dayWishes;
+    const weekOrder = new Map(plan.snapshot.weeks.map((w, idx) => [w.id, idx]));
+    return [...dayWishes].sort((a, b) => {
+      const wa = weekOrder.get(a.weekId) ?? 999;
+      const wb = weekOrder.get(b.weekId) ?? 999;
+      if (wa !== wb) return wa - wb;
+      const da = DAY_ORDER[a.day] ?? 99;
+      const db = DAY_ORDER[b.day] ?? 99;
+      return da - db;
+    });
+  }, [dayWishes, plan]);
 
   const selectTeacher = (code: string) => {
     const clean = code.trim().toUpperCase();
@@ -443,7 +532,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     const week = plan.snapshot.weeks.find((w) => w.id === exam.assignedWeekId);
     if (!week) return `${exam.assignedWeekId}`;
     const d = getWeekDayDate(week, exam.assignedDay);
-    return `${GERMAN_DAY_SHORT[exam.assignedDay]}, ${formatShortDate(d)} (KW ${week.weekNumber})`;
+    return `${GERMAN_DAY_SHORT[exam.assignedDay]}, ${formatShortDate(d)} · KW ${week.weekNumber}`;
   };
 
   const formatWishDateLabel = (weekId: string, day: DayOfWeek) => {
@@ -454,9 +543,41 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     return `${GERMAN_DAY_SHORT[day]}, ${formatShortDate(d)} (KW ${week.weekNumber})`;
   };
 
+  // Build rows of 7 days (Mon-Sun) with ISO KW on the left, matching ConfigSection's mini calendar
+  const calendarRows = useMemo(() => {
+    const year = calendarMonth.getFullYear();
+    const month = calendarMonth.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+    let startDay = firstDay.getDay() - 1;
+    if (startDay === -1) startDay = 6;
+
+    const totalSlots = Math.ceil((startDay + daysInMonth) / 7) * 7;
+    const rows: { kw: number; cells: Array<Date | null> }[] = [];
+
+    for (let rowStart = 0; rowStart < totalSlots; rowStart += 7) {
+      const cells: Array<Date | null> = [];
+      let sampleDate: Date | null = null;
+      for (let col = 0; col < 7; col++) {
+        const dayNum = rowStart + col - startDay + 1;
+        if (dayNum >= 1 && dayNum <= daysInMonth) {
+          const d = new Date(year, month, dayNum);
+          cells.push(d);
+          if (!sampleDate) sampleDate = d;
+        } else {
+          cells.push(null);
+        }
+      }
+      const kw = sampleDate ? getISOWeek(sampleDate) : 0;
+      rows.push({ kw, cells });
+    }
+    return rows;
+  }, [calendarMonth]);
+
   if (loading) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}>
         <div style={{ color: 'var(--text-secondary)', fontSize: '1rem' }}>Lade Klausurplan...</div>
       </div>
     );
@@ -464,10 +585,13 @@ export function ReviewPage({ planId }: ReviewPageProps) {
 
   if (error && !meta) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
-        <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '2rem', maxWidth: '460px', textAlign: 'center' }}>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+        <div
+          className="ui-card"
+          style={{ padding: '1.5rem', maxWidth: '420px', width: '100%', textAlign: 'center' }}
+        >
           <AlertCircle size={32} color="var(--accent-danger)" style={{ marginBottom: '0.75rem' }} />
-          <h2 style={{ fontSize: '1.2rem', marginBottom: '0.5rem' }}>Plan nicht verfügbar</h2>
+          <h2 style={{ fontSize: '1.15rem', marginBottom: '0.5rem' }}>Plan nicht verfügbar</h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>{error}</p>
         </div>
       </div>
@@ -477,28 +601,26 @@ export function ReviewPage({ planId }: ReviewPageProps) {
   // Step 1: Passcode Gate
   if (meta && !meta.unlocked) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
         <form
           onSubmit={handleUnlock}
+          className="ui-card"
           style={{
             width: '100%',
-            maxWidth: '420px',
-            background: 'var(--bg-panel)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '12px',
-            padding: '2rem',
+            maxWidth: '400px',
+            padding: '1.5rem',
             boxShadow: 'var(--shadow-lg)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '0.75rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '0.65rem' }}>
             <Lock size={22} color="var(--accent-primary)" />
-            <h1 style={{ fontSize: '1.25rem', fontWeight: 700 }}>{meta.title}</h1>
+            <h1 style={{ fontSize: '1.15rem', fontWeight: 700 }}>{meta.title}</h1>
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.25rem' }}>
-            Bitte gib den Zugangscode aus der Rundmail ein, um den Klausurplan anzusehen und Rückmeldung zu geben.
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '1.15rem' }}>
+            Bitte gib den Zugangscode aus der Rundmail ein, um deine Klausuren zu prüfen.
           </p>
 
-          <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.4rem' }}>
+          <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.35rem' }}>
             Zugangscode
           </label>
           <input
@@ -507,14 +629,10 @@ export function ReviewPage({ planId }: ReviewPageProps) {
             onChange={(e) => setPasscode(e.target.value)}
             placeholder="Code eingeben..."
             autoFocus
+            className="ui-input"
             style={{
-              width: '100%',
               padding: '0.7rem 0.85rem',
-              borderRadius: '6px',
-              border: '1px solid var(--border-color)',
-              background: 'var(--bg-app)',
-              color: 'var(--text-primary)',
-              fontSize: '1rem',
+              fontSize: '16px',
               marginBottom: '0.9rem',
             }}
           />
@@ -528,17 +646,8 @@ export function ReviewPage({ planId }: ReviewPageProps) {
           <button
             type="submit"
             disabled={unlocking || !passcode.trim()}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              borderRadius: '6px',
-              border: 'none',
-              background: 'var(--accent-primary)',
-              color: 'white',
-              fontWeight: 600,
-              fontSize: '0.95rem',
-              opacity: unlocking || !passcode.trim() ? 0.6 : 1,
-            }}
+            className="ui-btn ui-btn-primary"
+            style={{ width: '100%', padding: '0.75rem', fontSize: '0.95rem', minHeight: '44px' }}
           >
             {unlocking ? 'Prüfe Code...' : 'Plan öffnen'}
           </button>
@@ -558,55 +667,55 @@ export function ReviewPage({ planId }: ReviewPageProps) {
   // Step 2: Select Kürzel if not chosen yet
   if (!normalizedTeacherCode || isChangingTeacher) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
         <div
+          className="ui-card"
           style={{
             width: '100%',
-            maxWidth: '580px',
-            background: 'var(--bg-panel)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '12px',
-            padding: '2rem',
+            maxWidth: '520px',
+            padding: '1.4rem',
             boxShadow: 'var(--shadow-lg)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <UserCheck size={22} color="var(--accent-primary)" />
-              <h1 style={{ fontSize: '1.25rem', fontWeight: 700 }}>{plan.title}</h1>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.65rem', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+              <UserCheck size={22} color="var(--accent-primary)" style={{ flexShrink: 0 }} />
+              <h1 style={{ fontSize: '1.15rem', fontWeight: 700, wordBreak: 'break-word' }}>{plan.title}</h1>
             </div>
             {normalizedTeacherCode && (
               <button
+                type="button"
                 onClick={() => setIsChangingTeacher(false)}
-                style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.85rem' }}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.85rem', flexShrink: 0 }}
               >
                 Abbrechen
               </button>
             )}
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.25rem' }}>
-            Wähle dein Lehrkraft-Kürzel aus, damit deine Klausuren direkt vorgefiltert werden (du siehst danach trotzdem den kompletten Plan für alle Klassen).
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '1.1rem' }}>
+            Wähle dein Kürzel aus – du siehst danach direkt übersichtlich deine eigenen Klausuren.
           </p>
 
           {allTeacherCodes.length > 0 && (
-            <div style={{ marginBottom: '1.25rem' }}>
+            <div style={{ marginBottom: '1.1rem' }}>
               <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
                 Kürzel im Plan:
               </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', maxHeight: '220px', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', maxHeight: '230px', overflowY: 'auto' }}>
                 {allTeacherCodes.map((code) => (
                   <button
                     key={code}
                     type="button"
                     onClick={() => selectTeacher(code)}
                     style={{
-                      padding: '0.45rem 0.75rem',
-                      borderRadius: '6px',
+                      padding: '0.5rem 0.85rem',
+                      minHeight: '38px',
+                      borderRadius: '8px',
                       border: code === normalizedTeacherCode ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
-                      background: code === normalizedTeacherCode ? 'rgba(59, 130, 246, 0.2)' : 'var(--bg-app)',
+                      background: code === normalizedTeacherCode ? 'var(--accent-soft)' : 'var(--bg-panel)',
                       color: 'var(--text-primary)',
                       fontWeight: 600,
-                      fontSize: '0.85rem',
+                      fontSize: '0.88rem',
                     }}
                   >
                     {code}
@@ -621,35 +730,21 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               e.preventDefault();
               selectTeacher(customTeacherInput);
             }}
-            style={{ display: 'flex', gap: '0.5rem' }}
+            style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}
           >
             <input
               type="text"
               value={customTeacherInput}
               onChange={(e) => setCustomTeacherInput(e.target.value)}
-              placeholder="Oder Kürzel direkt eintippen (z. B. MÜL)..."
-              style={{
-                flex: 1,
-                padding: '0.65rem 0.85rem',
-                borderRadius: '6px',
-                border: '1px solid var(--border-color)',
-                background: 'var(--bg-app)',
-                color: 'var(--text-primary)',
-                fontSize: '0.9rem',
-              }}
+              placeholder="Oder Kürzel eintippen (z. B. MÜL)..."
+              className="ui-input"
+              style={{ flex: '1 1 180px', padding: '0.65rem 0.85rem', fontSize: '16px' }}
             />
             <button
               type="submit"
               disabled={!customTeacherInput.trim()}
-              style={{
-                padding: '0.65rem 1.1rem',
-                borderRadius: '6px',
-                border: 'none',
-                background: 'var(--accent-primary)',
-                color: 'white',
-                fontWeight: 600,
-                opacity: customTeacherInput.trim() ? 1 : 0.5,
-              }}
+              className="ui-btn ui-btn-primary"
+              style={{ minHeight: '42px', padding: '0 1.1rem' }}
             >
               Weiter
             </button>
@@ -659,436 +754,136 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     );
   }
 
-  // Overview classes filtered
   const overviewClasses = onlyMyClassesInOverview
     ? plan.snapshot.classes.filter((c) => myClasses.includes(c.className))
     : plan.snapshot.classes;
 
   const myExamIdsSet = new Set(myExams.map((e) => e.id));
   const answeredCount = myExams.filter((e) => Boolean(examFeedbackMap[e.id])).length;
+  const noGoCount = dayWishes.filter((w) => w.wishType === 'no_go').length;
+  const preferCount = dayWishes.filter((w) => w.wishType === 'prefer').length;
 
   return (
-    <div style={{ padding: '1.5rem', maxWidth: '1480px', margin: '0 auto', width: '100%' }}>
-      {/* Top Bar */}
-      <header
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '1rem',
-          padding: '1rem 1.25rem',
-          background: 'var(--bg-panel)',
-          border: '1px solid var(--border-color)',
-          borderRadius: '10px',
-          marginBottom: '1.25rem',
-        }}
-      >
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
-            <h1 style={{ fontSize: '1.35rem', fontWeight: 700 }}>{plan.title}</h1>
-            {!plan.isActive && (
-              <span
-                style={{
-                  fontSize: '0.75rem',
-                  padding: '2px 8px',
-                  borderRadius: '999px',
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  color: 'var(--accent-danger)',
-                  border: '1px solid var(--accent-danger)',
-                  fontWeight: 600,
-                }}
-              >
-                Abstimmung geschlossen (nur Ansicht)
-              </span>
-            )}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginTop: '0.35rem', fontSize: '0.85rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
-            <span>
-              Kürzel: <strong style={{ color: 'var(--text-primary)' }}>{normalizedTeacherCode}</strong>
-            </span>
-            <button
-              type="button"
-              onClick={() => setIsChangingTeacher(true)}
-              style={{
-                background: 'var(--bg-app)',
-                border: '1px solid var(--border-color)',
-                color: 'var(--text-secondary)',
-                padding: '2px 8px',
-                borderRadius: '4px',
-                fontSize: '0.75rem',
-              }}
-            >
-              Kürzel wechseln
-            </button>
-            {savedSubmission && (
-              <span style={{ color: 'var(--accent-success)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                <CheckCircle2 size={14} />
-                Letzte Rückmeldung gespeichert ({new Date(savedSubmission.updatedAt).toLocaleString('de-DE')})
-              </span>
-            )}
-          </div>
-        </div>
-
-        {plan.isActive && (
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={submitting}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '8px',
-              background: 'var(--accent-primary)',
-              color: 'white',
-              border: 'none',
-              padding: '0.7rem 1.25rem',
-              borderRadius: '8px',
-              fontWeight: 600,
-              fontSize: '0.95rem',
-              opacity: submitting ? 0.65 : 1,
-            }}
-          >
-            <Send size={16} />
-            {submitting
-              ? 'Speichere...'
-              : savedSubmission
-                ? 'Rückmeldung aktualisieren'
-                : 'Rückmeldung absenden'}
-          </button>
-        )}
-      </header>
-
-      {submitMessage && (
-        <div
+    <div style={{ padding: 'clamp(0.75rem, 2.5vw, 1.5rem)', width: '100%' }}>
+      {/* Centered compact container for colleague workflow */}
+      <div style={{ maxWidth: '720px', margin: '0 auto', width: '100%' }}>
+        {/* Compact Header */}
+        <header
+          className="ui-card"
           style={{
-            padding: '0.85rem 1rem',
-            borderRadius: '8px',
-            background: 'rgba(34, 197, 94, 0.15)',
-            border: '1px solid var(--accent-success)',
-            color: 'var(--text-primary)',
-            marginBottom: '1.25rem',
+            padding: '0.9rem 1rem',
+            marginBottom: '0.9rem',
             display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}
-        >
-          <CheckCircle2 size={18} color="var(--accent-success)" />
-          <span>{submitMessage}</span>
-        </div>
-      )}
-
-      {submitError && (
-        <div
-          style={{
-            padding: '0.85rem 1rem',
-            borderRadius: '8px',
-            background: 'rgba(239, 68, 68, 0.15)',
-            border: '1px solid var(--accent-danger)',
-            color: 'var(--text-primary)',
-            marginBottom: '1.25rem',
-          }}
-        >
-          {submitError}
-        </div>
-      )}
-
-      {/* Overview Section: Full Read-Only Schedule for All Classes */}
-      <section
-        style={{
-          background: 'var(--bg-panel)',
-          border: '1px solid var(--border-color)',
-          borderRadius: '10px',
-          marginBottom: '1.5rem',
-          overflow: 'hidden',
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
+            flexWrap: 'wrap',
             justifyContent: 'space-between',
             alignItems: 'center',
-            padding: '0.85rem 1.15rem',
-            borderBottom: showFullSchedule ? '1px solid var(--border-color)' : 'none',
-            flexWrap: 'wrap',
             gap: '0.75rem',
           }}
         >
-          <button
-            type="button"
-            onClick={() => setShowFullSchedule((v) => !v)}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <h1 style={{ fontSize: '1.15rem', fontWeight: 700, wordBreak: 'break-word' }}>{plan.title}</h1>
+              {!plan.isActive && (
+                <span
+                  style={{
+                    fontSize: '0.72rem',
+                    padding: '2px 8px',
+                    borderRadius: '999px',
+                    background: 'var(--accent-danger-soft)',
+                    color: 'var(--accent-danger)',
+                    border: '1px solid var(--accent-danger)',
+                    fontWeight: 600,
+                  }}
+                >
+                  Geschlossen
+                </span>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', marginTop: '0.3rem', fontSize: '0.84rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
+              <span>
+                Kürzel: <strong style={{ color: 'var(--text-primary)' }}>{normalizedTeacherCode}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsChangingTeacher(true)}
+                style={{
+                  background: 'var(--bg-panel)',
+                  border: '1px solid var(--border-color)',
+                  color: 'var(--text-secondary)',
+                  padding: '2px 8px',
+                  borderRadius: '6px',
+                  fontSize: '0.75rem',
+                  fontWeight: 600,
+                }}
+              >
+                Wechseln
+              </button>
+              {savedSubmission && (
+                <span style={{ color: 'var(--accent-success)', display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem' }}>
+                  <CheckCircle2 size={14} />
+                  Gespeichert ({new Date(savedSubmission.updatedAt).toLocaleDateString('de-DE')})
+                </span>
+              )}
+            </div>
+          </div>
+        </header>
+
+        {submitMessage && (
+          <div
             style={{
+              padding: '0.8rem 1rem',
+              borderRadius: '10px',
+              background: 'var(--accent-success-soft)',
+              border: '1px solid var(--accent-success)',
+              color: 'var(--text-primary)',
+              marginBottom: '0.9rem',
               display: 'flex',
               alignItems: 'center',
               gap: '8px',
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-primary)',
-              fontSize: '1.05rem',
-              fontWeight: 700,
+              fontSize: '0.9rem',
             }}
           >
-            <Calendar size={18} color="var(--accent-primary)" />
-            <span>Gesamtplan im Überblick ({plan.snapshot.classes.length} Klassen)</span>
-            {showFullSchedule ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-          </button>
-
-          {showFullSchedule && (
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
-              <button
-                type="button"
-                onClick={() => setOnlyMyClassesInOverview(false)}
-                style={{
-                  padding: '0.35rem 0.7rem',
-                  borderRadius: '6px',
-                  fontSize: '0.8rem',
-                  fontWeight: 600,
-                  border: '1px solid var(--border-color)',
-                  background: !onlyMyClassesInOverview ? 'var(--accent-primary)' : 'var(--bg-app)',
-                  color: !onlyMyClassesInOverview ? 'white' : 'var(--text-secondary)',
-                }}
-              >
-                Alle Klassen
-              </button>
-              {myClasses.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setOnlyMyClassesInOverview(true)}
-                  style={{
-                    padding: '0.35rem 0.7rem',
-                    borderRadius: '6px',
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    border: '1px solid var(--border-color)',
-                    background: onlyMyClassesInOverview ? 'var(--accent-primary)' : 'var(--bg-app)',
-                    color: onlyMyClassesInOverview ? 'white' : 'var(--text-secondary)',
-                  }}
-                >
-                  Nur meine Klassen ({myClasses.length})
-                </button>
-              )}
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: '0.25rem', cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={highlightMyExams}
-                  onChange={(e) => setHighlightMyExams(e.target.checked)}
-                />
-                Meine Klausuren hervorheben
-              </label>
-            </div>
-          )}
-        </div>
-
-        {showFullSchedule && (
-          <div style={{ overflow: 'auto', maxHeight: '420px', background: 'var(--bg-card)' }}>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: `130px repeat(${plan.snapshot.weeks.length * 5}, minmax(74px, 1fr))`,
-                minWidth: 'fit-content',
-              }}
-            >
-              {/* Corner */}
-              <div
-                style={{
-                  position: 'sticky',
-                  top: 0,
-                  left: 0,
-                  zIndex: 20,
-                  background: 'var(--bg-card)',
-                  borderRight: '1px solid var(--border-color)',
-                  borderBottom: '1px solid var(--border-color)',
-                  padding: '0.6rem 0.75rem',
-                  fontWeight: 700,
-                  fontSize: '0.85rem',
-                  gridColumn: '1 / 2',
-                  gridRow: '1 / 3',
-                  alignContent: 'center',
-                }}
-              >
-                Klasse
-              </div>
-
-              {/* Weeks */}
-              {plan.snapshot.weeks.map((week, idx) => (
-                <div
-                  key={week.id}
-                  style={{
-                    gridColumn: `${2 + idx * 5} / span 5`,
-                    gridRow: '1 / 2',
-                    position: 'sticky',
-                    top: 0,
-                    zIndex: 10,
-                    background: 'var(--bg-card)',
-                    borderRight: '1px solid var(--border-color)',
-                    borderBottom: '1px solid var(--border-color)',
-                    padding: '0.35rem 0.5rem',
-                    textAlign: 'center',
-                    fontSize: '0.8rem',
-                    fontWeight: 700,
-                    color: week.isBlocked ? 'var(--accent-danger)' : 'var(--text-primary)',
-                  }}
-                >
-                  KW {week.weekNumber}{' '}
-                  <span style={{ fontWeight: 400, color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
-                    ({getWeekDateRangeString(week)})
-                  </span>
-                </div>
-              ))}
-
-              {/* Days */}
-              {plan.snapshot.weeks.map((week, wIdx) =>
-                DAYS_OF_WEEK.map((day, dIdx) => {
-                  const dayDate = getWeekDayDate(week, day);
-                  const isGlobalBlocked = week.isBlocked || Boolean(plan.snapshot.blockedDays[week.id]?.[day]);
-                  return (
-                    <div
-                      key={`${week.id}-${day}`}
-                      style={{
-                        gridColumn: `${2 + wIdx * 5 + dIdx} / span 1`,
-                        gridRow: '2 / 3',
-                        position: 'sticky',
-                        top: '30px',
-                        zIndex: 10,
-                        background: isGlobalBlocked ? 'rgba(239, 68, 68, 0.12)' : 'var(--bg-panel)',
-                        borderRight: '1px solid var(--border-color)',
-                        borderBottom: '1px solid var(--border-color)',
-                        padding: '0.25rem',
-                        textAlign: 'center',
-                        fontSize: '0.72rem',
-                        color: isGlobalBlocked ? 'var(--accent-danger)' : 'var(--text-secondary)',
-                      }}
-                    >
-                      <div style={{ fontWeight: 600 }}>{GERMAN_DAY_SHORT[day]}</div>
-                      <div>{formatShortDate(dayDate)}</div>
-                    </div>
-                  );
-                })
-              )}
-
-              {/* Rows */}
-              {overviewClasses.map((cls, cIdx) => {
-                const row = 3 + cIdx;
-                return (
-                  <div key={cls.className} style={{ display: 'contents' }}>
-                    <div
-                      style={{
-                        gridColumn: '1 / 2',
-                        gridRow: `${row} / ${row + 1}`,
-                        position: 'sticky',
-                        left: 0,
-                        zIndex: 5,
-                        background: 'var(--bg-panel)',
-                        borderRight: '1px solid var(--border-color)',
-                        borderBottom: '1px solid var(--border-color)',
-                        padding: '0.45rem 0.75rem',
-                        fontWeight: 600,
-                        fontSize: '0.82rem',
-                        display: 'flex',
-                        alignItems: 'center',
-                      }}
-                    >
-                      {cls.className}
-                    </div>
-
-                    {plan.snapshot.weeks.map((week, wIdx) =>
-                      DAYS_OF_WEEK.map((day, dIdx) => {
-                        const isBlocked =
-                          week.isBlocked ||
-                          Boolean(plan.snapshot.blockedDays[week.id]?.[day]) ||
-                          Boolean(plan.snapshot.blockedClassDays[cls.className]?.[week.id]?.[day]);
-
-                        const cellExams = plan.snapshot.exams.filter(
-                          (e) => e.className === cls.className && e.assignedWeekId === week.id && e.assignedDay === day
-                        );
-
-                        return (
-                          <div
-                            key={`${cls.className}-${week.id}-${day}`}
-                            style={{
-                              gridColumn: `${2 + wIdx * 5 + dIdx} / span 1`,
-                              gridRow: `${row} / ${row + 1}`,
-                              minHeight: '46px',
-                              padding: '3px',
-                              borderRight: '1px solid var(--border-color)',
-                              borderBottom: '1px solid var(--border-color)',
-                              background: isBlocked
-                                ? 'repeating-linear-gradient(45deg, var(--bg-app), var(--bg-app) 8px, var(--bg-panel) 8px, var(--bg-panel) 16px)'
-                                : 'transparent',
-                              opacity: isBlocked ? 0.55 : 1,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: '3px',
-                            }}
-                          >
-                            {cellExams.map((exam) => {
-                              const isMine = myExamIdsSet.has(exam.id);
-                              const teachers = getExamTeachersNormalized(
-                                exam,
-                                plan.snapshot.classes,
-                                plan.snapshot.weeks
-                              );
-                              const fb = examFeedbackMap[exam.id];
-                              return (
-                                <div
-                                  key={exam.id}
-                                  style={{
-                                    padding: '3px 5px',
-                                    borderRadius: '4px',
-                                    fontSize: '0.73rem',
-                                    background:
-                                      highlightMyExams && isMine
-                                        ? 'rgba(59, 130, 246, 0.25)'
-                                        : 'var(--bg-panel)',
-                                    border:
-                                      fb?.status === 'not_ok'
-                                        ? '1px solid var(--accent-danger)'
-                                        : fb?.status === 'ok'
-                                          ? '1px solid var(--accent-success)'
-                                          : highlightMyExams && isMine
-                                            ? '1px solid var(--accent-primary)'
-                                            : '1px solid var(--border-color)',
-                                  }}
-                                >
-                                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{exam.subject}</div>
-                                  {teachers.length > 0 && (
-                                    <div style={{ fontSize: '0.66rem', color: 'var(--text-secondary)' }}>
-                                      {teachers.join(', ')}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+            <CheckCircle2 size={18} color="var(--accent-success)" style={{ flexShrink: 0 }} />
+            <span>{submitMessage}</span>
           </div>
         )}
-      </section>
 
-      {/* Main 2-step Colleague Sections */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1.25rem', alignItems: 'start' }}>
-        {/* Section 1: My Exams (Passt / Passt nicht) */}
-        <section
-          style={{
-            background: 'var(--bg-panel)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '10px',
-            padding: '1.25rem',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+        {submitError && (
+          <div
+            style={{
+              padding: '0.8rem 1rem',
+              borderRadius: '10px',
+              background: 'var(--accent-danger-soft)',
+              border: '1px solid var(--accent-danger)',
+              color: 'var(--text-primary)',
+              marginBottom: '0.9rem',
+              fontSize: '0.9rem',
+            }}
+          >
+            {submitError}
+          </div>
+        )}
+
+        {/* Main Card: ONLY "Meine Klausuren" + expandable compact calendar below */}
+        <section className="ui-card" style={{ padding: 'clamp(0.9rem, 2.5vw, 1.25rem)', marginBottom: '0.9rem' }}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '0.65rem',
+              marginBottom: '0.9rem',
+              flexWrap: 'wrap',
+            }}
+          >
             <div>
-              <h2 style={{ fontSize: '1.1rem', fontWeight: 700 }}>
-                1. Meine Klausuren ({myExams.length})
+              <h2 style={{ fontSize: '1.08rem', fontWeight: 700 }}>
+                Meine Klausuren ({myExams.length})
               </h2>
               <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                {answeredCount}/{myExams.length} bewertet · Klicke einfach „Passt“ oder „Passt nicht“.
+                {myExams.length > 0
+                  ? `${answeredCount} von ${myExams.length} bewertet`
+                  : 'Keine direkt zugeordneten Klausuren'}
               </p>
             </div>
             {plan.isActive && myExams.length > 0 && answeredCount < myExams.length && (
@@ -1099,27 +894,37 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '5px',
-                  padding: '0.4rem 0.75rem',
-                  borderRadius: '6px',
+                  padding: '0.45rem 0.75rem',
+                  borderRadius: '8px',
                   border: '1px solid var(--accent-success)',
-                  background: 'rgba(34, 197, 94, 0.12)',
+                  background: 'var(--accent-success-soft)',
                   color: 'var(--accent-success)',
                   fontWeight: 600,
                   fontSize: '0.8rem',
                 }}
               >
                 <Check size={14} />
-                Alle offenen auf „Passt“
+                Alle offenen „Passt“
               </button>
             )}
           </div>
 
           {myExams.length === 0 ? (
-            <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.88rem', background: 'var(--bg-app)', borderRadius: '8px' }}>
-              Für das Kürzel <strong>{normalizedTeacherCode}</strong> sind im Plan keine Klausuren zugeordnet. Falls eine Klausur fehlt, kannst du sie unten manuell hinzufügen.
+            <div
+              style={{
+                padding: '1.1rem',
+                textAlign: 'center',
+                color: 'var(--text-secondary)',
+                fontSize: '0.88rem',
+                background: 'var(--bg-panel)',
+                borderRadius: '8px',
+                border: '1px solid var(--border-subtle)',
+              }}
+            >
+              Für <strong>{normalizedTeacherCode}</strong> sind keine Klausuren im Plan eingetragen. Falls eine fehlt, kannst du sie unten ergänzen oder über den Kalender freie/gesperrte Tage angeben.
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
               {myExams.map((exam) => {
                 const fb = examFeedbackMap[exam.id];
                 const status = fb?.status;
@@ -1128,42 +933,62 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                     key={exam.id}
                     style={{
                       padding: '0.85rem',
-                      borderRadius: '8px',
-                      background: 'var(--bg-app)',
+                      borderRadius: '10px',
+                      background: 'var(--bg-panel)',
                       border:
                         status === 'not_ok'
-                          ? '1px solid var(--accent-danger)'
+                          ? '1.5px solid var(--accent-danger)'
                           : status === 'ok'
-                            ? '1px solid var(--accent-success)'
-                            : '1px solid var(--border-color)',
+                            ? '1.5px solid var(--accent-success)'
+                            : '1px solid var(--border-subtle)',
                     }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '0.75rem',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: '1 1 180px' }}>
+                        <div style={{ fontWeight: 700, fontSize: '0.96rem', color: 'var(--text-primary)' }}>
                           {exam.className} · {exam.subject}
                         </div>
-                        <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px' }}>
-                          <Clock size={13} />
+                        <div
+                          style={{
+                            fontSize: '0.82rem',
+                            color: 'var(--text-secondary)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            marginTop: '3px',
+                          }}
+                        >
+                          <Clock size={13} style={{ flexShrink: 0 }} />
                           <span>{formatExamDateLabel(exam)}</span>
                         </div>
                       </div>
 
-                      <div style={{ display: 'flex', gap: '0.45rem' }}>
+                      <div style={{ display: 'flex', gap: '0.45rem', flex: '1 1 210px', justifyContent: 'flex-end' }}>
                         <button
                           type="button"
                           disabled={!plan.isActive}
                           onClick={() => setExamStatus(exam, 'ok')}
                           style={{
+                            flex: 1,
+                            minHeight: '40px',
                             display: 'inline-flex',
                             alignItems: 'center',
+                            justifyContent: 'center',
                             gap: '5px',
-                            padding: '0.45rem 0.8rem',
-                            borderRadius: '6px',
+                            padding: '0.45rem 0.75rem',
+                            borderRadius: '8px',
                             fontWeight: 600,
-                            fontSize: '0.85rem',
+                            fontSize: '0.86rem',
                             border: status === 'ok' ? '1px solid var(--accent-success)' : '1px solid var(--border-color)',
-                            background: status === 'ok' ? 'var(--accent-success)' : 'var(--bg-panel)',
+                            background: status === 'ok' ? 'var(--accent-success)' : 'var(--bg-surface)',
                             color: status === 'ok' ? 'white' : 'var(--text-primary)',
                           }}
                         >
@@ -1176,15 +1001,18 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                           disabled={!plan.isActive}
                           onClick={() => setExamStatus(exam, 'not_ok')}
                           style={{
+                            flex: 1,
+                            minHeight: '40px',
                             display: 'inline-flex',
                             alignItems: 'center',
+                            justifyContent: 'center',
                             gap: '5px',
-                            padding: '0.45rem 0.8rem',
-                            borderRadius: '6px',
+                            padding: '0.45rem 0.75rem',
+                            borderRadius: '8px',
                             fontWeight: 600,
-                            fontSize: '0.85rem',
+                            fontSize: '0.86rem',
                             border: status === 'not_ok' ? '1px solid var(--accent-danger)' : '1px solid var(--border-color)',
-                            background: status === 'not_ok' ? 'var(--accent-danger)' : 'var(--bg-panel)',
+                            background: status === 'not_ok' ? 'var(--accent-danger)' : 'var(--bg-surface)',
                             color: status === 'not_ok' ? 'white' : 'var(--text-primary)',
                           }}
                         >
@@ -1195,7 +1023,16 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                     </div>
 
                     {status === 'not_ok' && (
-                      <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                      <div
+                        style={{
+                          marginTop: '0.75rem',
+                          paddingTop: '0.75rem',
+                          borderTop: '1px solid var(--border-subtle)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '0.55rem',
+                        }}
+                      >
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
                           {(
                             [
@@ -1212,13 +1049,15 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                                 disabled={!plan.isActive}
                                 onClick={() => setExamPreference(exam, opt.key)}
                                 style={{
+                                  flex: '1 1 auto',
+                                  minHeight: '36px',
                                   padding: '0.35rem 0.65rem',
-                                  borderRadius: '6px',
+                                  borderRadius: '8px',
                                   fontSize: '0.8rem',
                                   fontWeight: 600,
                                   border: active ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
-                                  background: active ? 'rgba(59, 130, 246, 0.22)' : 'var(--bg-panel)',
-                                  color: 'var(--text-primary)',
+                                  background: active ? 'var(--accent-soft)' : 'var(--bg-surface)',
+                                  color: active ? 'var(--accent-primary)' : 'var(--text-primary)',
                                 }}
                               >
                                 {opt.label}
@@ -1232,16 +1071,9 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                           disabled={!plan.isActive}
                           value={fb?.note || ''}
                           onChange={(e) => setExamNote(exam, e.target.value)}
-                          placeholder="Kurzer Grund / Hinweis (optional, z. B. Stoff fehlt noch)..."
-                          style={{
-                            width: '100%',
-                            padding: '0.45rem 0.65rem',
-                            borderRadius: '6px',
-                            border: '1px solid var(--border-color)',
-                            background: 'var(--bg-panel)',
-                            color: 'var(--text-primary)',
-                            fontSize: '0.83rem',
-                          }}
+                          placeholder="Kurzer Grund (optional, z. B. Stoff fehlt)..."
+                          className="ui-input"
+                          style={{ fontSize: '16px', padding: '0.5rem 0.7rem' }}
                         />
                       </div>
                     )}
@@ -1252,15 +1084,16 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                           marginTop: '0.55rem',
                           fontSize: '0.78rem',
                           padding: '0.35rem 0.6rem',
-                          borderRadius: '5px',
+                          borderRadius: '6px',
                           background:
                             fb.resolutionStatus === 'applied'
-                              ? 'rgba(34, 197, 94, 0.14)'
-                              : 'rgba(234, 179, 8, 0.14)',
+                              ? 'var(--accent-success-soft)'
+                              : 'var(--accent-warning-soft)',
                           color:
                             fb.resolutionStatus === 'applied'
                               ? 'var(--accent-success)'
                               : 'var(--accent-warning)',
+                          fontWeight: 600,
                         }}
                       >
                         Planung: {fb.resolutionStatus === 'applied' ? 'Übernommen ✓' : 'Leider nicht möglich'}
@@ -1274,7 +1107,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
           )}
 
           {plan.isActive && otherExams.length > 0 && (
-            <div style={{ marginTop: '0.85rem' }}>
+            <div style={{ marginTop: '0.75rem' }}>
               <button
                 type="button"
                 onClick={() => setShowExtraExamPicker((v) => !v)}
@@ -1286,6 +1119,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                   border: 'none',
                   color: 'var(--text-secondary)',
                   fontSize: '0.8rem',
+                  padding: '4px 0',
                 }}
               >
                 <Plus size={14} />
@@ -1293,7 +1127,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               </button>
 
               {showExtraExamPicker && (
-                <div style={{ marginTop: '0.5rem' }}>
+                <div style={{ marginTop: '0.45rem' }}>
                   <select
                     defaultValue=""
                     onChange={(e) => {
@@ -1301,15 +1135,8 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                       setExtraExamIds((prev) => (prev.includes(e.target.value) ? prev : [...prev, e.target.value]));
                       setShowExtraExamPicker(false);
                     }}
-                    style={{
-                      width: '100%',
-                      padding: '0.45rem 0.65rem',
-                      borderRadius: '6px',
-                      border: '1px solid var(--border-color)',
-                      background: 'var(--bg-app)',
-                      color: 'var(--text-primary)',
-                      fontSize: '0.85rem',
-                    }}
+                    className="ui-input"
+                    style={{ fontSize: '16px', padding: '0.5rem 0.7rem' }}
                   >
                     <option value="">-- Klausur auswählen --</option>
                     {otherExams.map((e) => (
@@ -1322,301 +1149,829 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               )}
             </div>
           )}
-        </section>
 
-        {/* Section 2: Always-available Calendar for No-Go Dates & Wishes */}
-        <section
-          style={{
-            background: 'var(--bg-panel)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '10px',
-            padding: '1.25rem',
-          }}
-        >
-          <h2 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.25rem' }}>
-            2. Termine, die auf keinen Fall gehen & Wünsche
-          </h2>
-          <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '0.9rem' }}>
-            Auch wenn oben alles „Passt“, kannst du hier Tage markieren, an denen du (oder eine Klasse) auf keinen Fall schreiben kannst – z. B. falls später noch etwas verschoben werden muss.
-          </p>
-
-          {/* Controls */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '0.9rem', alignItems: 'center' }}>
-            <div style={{ display: 'flex', gap: '0.35rem' }}>
-              <button
-                type="button"
-                onClick={() => setWishMode('no_go')}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '5px',
-                  padding: '0.45rem 0.75rem',
-                  borderRadius: '6px',
-                  fontSize: '0.82rem',
-                  fontWeight: 600,
-                  border: wishMode === 'no_go' ? '1px solid var(--accent-danger)' : '1px solid var(--border-color)',
-                  background: wishMode === 'no_go' ? 'rgba(239, 68, 68, 0.2)' : 'var(--bg-app)',
-                  color: wishMode === 'no_go' ? 'var(--accent-danger)' : 'var(--text-secondary)',
-                }}
-              >
-                <Ban size={14} />
-                Auf keinen Fall
-              </button>
-              <button
-                type="button"
-                onClick={() => setWishMode('prefer')}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '5px',
-                  padding: '0.45rem 0.75rem',
-                  borderRadius: '6px',
-                  fontSize: '0.82rem',
-                  fontWeight: 600,
-                  border: wishMode === 'prefer' ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
-                  background: wishMode === 'prefer' ? 'rgba(59, 130, 246, 0.2)' : 'var(--bg-app)',
-                  color: wishMode === 'prefer' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                }}
-              >
-                <Star size={14} />
-                Wunschtermin
-              </button>
-            </div>
-
-            <select
-              value={wishClassScope}
-              onChange={(e) => setWishClassScope(e.target.value)}
+          {/* Expandable Compact Day-Marking Calendar directly under Passt / Passt nicht */}
+          <div style={{ marginTop: '1rem', paddingTop: '0.9rem', borderTop: '1px solid var(--border-subtle)' }}>
+            <button
+              type="button"
+              onClick={() => setShowDayCalendar((v) => !v)}
               style={{
-                flex: 1,
-                minWidth: '180px',
-                padding: '0.45rem 0.65rem',
-                borderRadius: '6px',
-                border: '1px solid var(--border-color)',
-                background: 'var(--bg-app)',
+                width: '100%',
+                minHeight: '44px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '0.6rem',
+                padding: '0.6rem 0.85rem',
+                borderRadius: '10px',
+                border: showDayCalendar ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
+                background: showDayCalendar ? 'var(--accent-soft)' : 'var(--bg-panel)',
                 color: 'var(--text-primary)',
-                fontSize: '0.82rem',
+                fontWeight: 600,
+                fontSize: '0.88rem',
+                textAlign: 'left',
               }}
             >
-              <option value="ALL_MY_CLASSES">Gilt für alle meine Klassen ({normalizedTeacherCode})</option>
-              {plan.snapshot.classes.map((cls) => (
-                <option key={cls.className} value={cls.className}>
-                  Nur Klasse {cls.className}
-                </option>
-              ))}
-            </select>
-          </div>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                <Calendar size={17} color="var(--accent-primary)" style={{ flexShrink: 0 }} />
+                <span>Tage im Kalender markieren (was passt / nicht passt)</span>
+              </span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                {dayWishes.length > 0 && (
+                  <span
+                    style={{
+                      fontSize: '0.74rem',
+                      padding: '2px 7px',
+                      borderRadius: '999px',
+                      background: 'var(--bg-surface)',
+                      border: '1px solid var(--border-color)',
+                      color: 'var(--text-secondary)',
+                      fontWeight: 700,
+                    }}
+                  >
+                    {noGoCount > 0 && `${noGoCount}× Nein`}
+                    {noGoCount > 0 && preferCount > 0 && ' · '}
+                    {preferCount > 0 && `${preferCount}× Passt`}
+                  </span>
+                )}
+                {showDayCalendar ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
+              </span>
+            </button>
 
-          {/* Clickable Week/Day Grid */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
-            {plan.snapshot.weeks.map((week) => (
+            {showDayCalendar && (
               <div
-                key={week.id}
                 style={{
-                  background: 'var(--bg-app)',
-                  border: '1px solid var(--border-color)',
-                  borderRadius: '8px',
-                  padding: '0.5rem 0.65rem',
+                  marginTop: '0.75rem',
+                  padding: '0.9rem',
+                  borderRadius: '10px',
+                  background: 'var(--bg-panel)',
+                  border: '1px solid var(--border-subtle)',
                 }}
               >
-                <div style={{ fontSize: '0.78rem', fontWeight: 700, marginBottom: '0.4rem', color: week.isBlocked ? 'var(--accent-danger)' : 'var(--text-secondary)' }}>
-                  KW {week.weekNumber} ({getWeekDateRangeString(week)}){week.isBlocked ? ' – Woche gesperrt' : ''}
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.35rem' }}>
-                  {DAYS_OF_WEEK.map((day) => {
-                    const dayDate = getWeekDayDate(week, day);
-                    const isGlobalBlocked = week.isBlocked || Boolean(plan.snapshot.blockedDays[week.id]?.[day]);
-                    const activeScopeClass = wishClassScope === 'ALL_MY_CLASSES' ? null : wishClassScope;
-                    const exactWish = dayWishes.find(
-                      (w) => w.weekId === week.id && w.day === day && (w.className || null) === activeScopeClass
-                    );
-                    const anyWishCount = dayWishes.filter((w) => w.weekId === week.id && w.day === day).length;
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
+                  Modus wählen und Tage im Kalender antippen – z. B. wenn du an bestimmten Tagen auf keinen Fall kannst oder Wunschtage hast.
+                </p>
 
-                    return (
-                      <button
-                        key={day}
-                        type="button"
-                        disabled={!plan.isActive || isGlobalBlocked}
-                        onClick={() => toggleWishDay(week.id, day)}
+                {/* Mode Switch + Class Scope */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', marginBottom: '0.85rem' }}>
+                  <div style={{ display: 'flex', gap: '0.45rem' }}>
+                    <button
+                      type="button"
+                      onClick={() => setWishMode('no_go')}
+                      style={{
+                        flex: 1,
+                        minHeight: '40px',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px',
+                        padding: '0.45rem 0.7rem',
+                        borderRadius: '8px',
+                        fontSize: '0.84rem',
+                        fontWeight: 600,
+                        border: wishMode === 'no_go' ? '1.5px solid var(--accent-danger)' : '1px solid var(--border-color)',
+                        background: wishMode === 'no_go' ? 'var(--accent-danger-soft)' : 'var(--bg-surface)',
+                        color: wishMode === 'no_go' ? 'var(--accent-danger)' : 'var(--text-secondary)',
+                      }}
+                    >
+                      <Ban size={15} />
+                      Passt nicht
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWishMode('prefer')}
+                      style={{
+                        flex: 1,
+                        minHeight: '40px',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px',
+                        padding: '0.45rem 0.7rem',
+                        borderRadius: '8px',
+                        fontSize: '0.84rem',
+                        fontWeight: 600,
+                        border: wishMode === 'prefer' ? '1.5px solid var(--accent-success)' : '1px solid var(--border-color)',
+                        background: wishMode === 'prefer' ? 'var(--accent-success-soft)' : 'var(--bg-surface)',
+                        color: wishMode === 'prefer' ? 'var(--accent-success)' : 'var(--text-secondary)',
+                      }}
+                    >
+                      <Check size={15} />
+                      Passt gut
+                    </button>
+                  </div>
+
+                  <select
+                    value={wishClassScope}
+                    onChange={(e) => setWishClassScope(e.target.value)}
+                    className="ui-input"
+                    style={{ fontSize: '16px', padding: '0.45rem 0.65rem' }}
+                  >
+                    <option value="ALL_MY_CLASSES">Gilt für alle meine Klassen ({normalizedTeacherCode})</option>
+                    {plan.snapshot.classes.map((cls) => (
+                      <option key={cls.className} value={cls.className}>
+                        Nur Klasse {cls.className}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Quick Month Chips if multiple months exist */}
+                {planMonths.length > 1 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', justifyContent: 'center', marginBottom: '0.65rem' }}>
+                    {planMonths.map((pm) => {
+                      const active =
+                        pm.getFullYear() === calendarMonth.getFullYear() &&
+                        pm.getMonth() === calendarMonth.getMonth();
+                      return (
+                        <button
+                          key={`${pm.getFullYear()}-${pm.getMonth()}`}
+                          type="button"
+                          onClick={() => setCalendarMonth(pm)}
+                          style={{
+                            padding: '3px 9px',
+                            borderRadius: '999px',
+                            fontSize: '0.75rem',
+                            fontWeight: 600,
+                            border: active ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
+                            background: active ? 'var(--accent-primary)' : 'var(--bg-surface)',
+                            color: active ? 'white' : 'var(--text-secondary)',
+                          }}
+                        >
+                          {pm.toLocaleString('de-DE', { month: 'short', year: '2-digit' })}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Compact Mini Month Calendar (like ConfigSection / Import) */}
+                <div
+                  style={{
+                    maxWidth: '360px',
+                    width: '100%',
+                    margin: '0 auto',
+                    background: 'var(--bg-surface)',
+                    padding: '0.75rem',
+                    borderRadius: '10px',
+                    border: '1px solid var(--border-color)',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: '0.6rem',
+                      gap: '0.4rem',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="ui-btn"
+                      style={{ padding: '6px', minWidth: '34px', minHeight: '34px' }}
+                      onClick={() =>
+                        setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))
+                      }
+                      title="Vorheriger Monat"
+                    >
+                      <ChevronLeft size={16} />
+                    </button>
+                    <div style={{ fontWeight: 700, fontSize: '0.92rem', textAlign: 'center' }}>
+                      {calendarMonth.toLocaleString('de-DE', { month: 'long', year: 'numeric' })}
+                    </div>
+                    <button
+                      type="button"
+                      className="ui-btn"
+                      style={{ padding: '6px', minWidth: '34px', minHeight: '34px' }}
+                      onClick={() =>
+                        setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))
+                      }
+                      title="Nächster Monat"
+                    >
+                      <ChevronRight size={16} />
+                    </button>
+                  </div>
+
+                  {/* Header: KW + Mo..So */}
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '30px repeat(7, 1fr)',
+                      gap: '3px',
+                      textAlign: 'center',
+                      fontSize: '0.72rem',
+                      fontWeight: 600,
+                      color: 'var(--text-muted)',
+                      marginBottom: '4px',
+                    }}
+                  >
+                    <div>KW</div>
+                    <div>Mo</div>
+                    <div>Di</div>
+                    <div>Mi</div>
+                    <div>Do</div>
+                    <div>Fr</div>
+                    <div>Sa</div>
+                    <div>So</div>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    {calendarRows.map((row, rIdx) => (
+                      <div
+                        key={`${calendarMonth.getFullYear()}-${calendarMonth.getMonth()}-r${rIdx}`}
                         style={{
-                          padding: '0.4rem 0.25rem',
-                          borderRadius: '6px',
-                          border:
-                            exactWish?.wishType === 'no_go'
-                              ? '1px solid var(--accent-danger)'
-                              : exactWish?.wishType === 'prefer'
-                                ? '1px solid var(--accent-primary)'
-                                : '1px solid var(--border-color)',
-                          background: isGlobalBlocked
-                            ? 'rgba(148, 163, 184, 0.08)'
-                            : exactWish?.wishType === 'no_go'
-                              ? 'rgba(239, 68, 68, 0.22)'
-                              : exactWish?.wishType === 'prefer'
-                                ? 'rgba(59, 130, 246, 0.22)'
-                                : 'var(--bg-panel)',
-                          color: isGlobalBlocked ? 'var(--text-secondary)' : 'var(--text-primary)',
-                          opacity: isGlobalBlocked ? 0.45 : 1,
-                          fontSize: '0.75rem',
-                          display: 'flex',
-                          flexDirection: 'column',
+                          display: 'grid',
+                          gridTemplateColumns: '30px repeat(7, 1fr)',
+                          gap: '3px',
                           alignItems: 'center',
-                          gap: '2px',
                         }}
                       >
-                        <span style={{ fontWeight: 700 }}>{GERMAN_DAY_SHORT[day]}</span>
-                        <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-                          {formatShortDate(dayDate)}
-                        </span>
-                        {exactWish ? (
-                          <span style={{ fontSize: '0.68rem', fontWeight: 700, color: exactWish.wishType === 'no_go' ? 'var(--accent-danger)' : 'var(--accent-primary)' }}>
-                            {exactWish.wishType === 'no_go' ? 'No-Go' : 'Wunsch'}
-                          </span>
-                        ) : anyWishCount > 0 ? (
-                          <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
-                            {anyWishCount}× markiert
-                          </span>
-                        ) : null}
-                      </button>
+                        <div
+                          style={{
+                            fontSize: '0.68rem',
+                            fontWeight: 700,
+                            fontFamily: 'monospace',
+                            color: 'var(--accent-primary)',
+                            background: 'var(--accent-soft)',
+                            borderRadius: '4px',
+                            textAlign: 'center',
+                            padding: '4px 2px',
+                          }}
+                          title={`Kalenderwoche ${row.kw}`}
+                        >
+                          {row.kw}
+                        </div>
+
+                        {row.cells.map((date, cIdx) => {
+                          if (!date) return <div key={`e-${cIdx}`} />;
+                          const isWeekend = cIdx >= 5;
+                          const iso = formatISODate(date);
+                          const slot = !isWeekend ? dateSlotMap.get(iso) : undefined;
+                          const inPlan = Boolean(slot);
+                          const isBlocked = Boolean(slot?.isGlobalBlocked);
+                          const clickable = Boolean(plan.isActive && slot && !isBlocked);
+
+                          const activeScopeClass = wishClassScope === 'ALL_MY_CLASSES' ? null : wishClassScope;
+                          const exactWish = slot
+                            ? dayWishes.find(
+                                (w) =>
+                                  w.weekId === slot.weekId &&
+                                  w.day === slot.day &&
+                                  (w.className || null) === activeScopeClass
+                              )
+                            : undefined;
+                          const otherScopeWishCount = slot
+                            ? dayWishes.filter(
+                                (w) =>
+                                  w.weekId === slot.weekId &&
+                                  w.day === slot.day &&
+                                  (w.className || null) !== activeScopeClass
+                              ).length
+                            : 0;
+                          const hasMyExam = myExamIsoDates.has(iso);
+
+                          let bg = 'transparent';
+                          let border = '1px solid transparent';
+                          let color = 'var(--text-primary)';
+
+                          if (isWeekend || !inPlan) {
+                            color = 'var(--text-muted)';
+                          } else if (isBlocked) {
+                            bg = 'var(--bg-app)';
+                            color = 'var(--text-muted)';
+                          } else if (exactWish?.wishType === 'no_go') {
+                            bg = 'var(--accent-danger)';
+                            border = '1px solid var(--accent-danger)';
+                            color = '#ffffff';
+                          } else if (exactWish?.wishType === 'prefer') {
+                            bg = 'var(--accent-success)';
+                            border = '1px solid var(--accent-success)';
+                            color = '#ffffff';
+                          } else if (otherScopeWishCount > 0) {
+                            bg = 'var(--bg-panel)';
+                            border = '1px dashed var(--border-color)';
+                          } else {
+                            bg = 'var(--bg-panel)';
+                            border = '1px solid var(--border-subtle)';
+                          }
+
+                          return (
+                            <button
+                              key={date.getDate()}
+                              type="button"
+                              disabled={!clickable}
+                              onClick={() => {
+                                if (slot && clickable) {
+                                  toggleWishDay(slot.weekId, slot.day);
+                                }
+                              }}
+                              title={
+                                isWeekend
+                                  ? 'Wochenende'
+                                  : !inPlan
+                                    ? 'Außerhalb des Klausurzeitraums'
+                                    : isBlocked
+                                      ? 'Ferien / global gesperrt'
+                                      : exactWish?.wishType === 'no_go'
+                                        ? 'Markiert: Passt nicht'
+                                        : exactWish?.wishType === 'prefer'
+                                          ? 'Markiert: Passt gut'
+                                          : 'Antippen zum Markieren'
+                              }
+                              style={{
+                                position: 'relative',
+                                minHeight: '36px',
+                                padding: '2px 0',
+                                borderRadius: '6px',
+                                border,
+                                background: bg,
+                                color,
+                                fontWeight: exactWish || hasMyExam ? 700 : 500,
+                                fontSize: '0.8rem',
+                                opacity: isWeekend || !inPlan ? 0.35 : isBlocked ? 0.5 : 1,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                cursor: clickable ? 'pointer' : 'default',
+                              }}
+                            >
+                              <span>{date.getDate()}</span>
+                              {hasMyExam && (
+                                <span
+                                  style={{
+                                    width: '5px',
+                                    height: '5px',
+                                    borderRadius: '50%',
+                                    background: exactWish ? '#ffffff' : 'var(--accent-primary)',
+                                    marginTop: '1px',
+                                  }}
+                                />
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Compact Legend */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      justifyContent: 'center',
+                      gap: '0.65rem',
+                      marginTop: '0.65rem',
+                      paddingTop: '0.55rem',
+                      borderTop: '1px solid var(--border-subtle)',
+                      fontSize: '0.72rem',
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ width: '10px', height: '10px', borderRadius: '3px', background: 'var(--accent-danger)' }} />
+                      Passt nicht
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ width: '10px', height: '10px', borderRadius: '3px', background: 'var(--accent-success)' }} />
+                      Passt gut
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: 'var(--accent-primary)' }} />
+                      Eigene Klausur
+                    </span>
+                  </div>
+                </div>
+
+                {/* Selected Days List */}
+                {sortedDayWishes.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', marginTop: '0.85rem' }}>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                      Eingetragene Tage ({sortedDayWishes.length}):
+                    </div>
+                    {sortedDayWishes.map((w) => (
+                      <div
+                        key={w.id}
+                        style={{
+                          padding: '0.55rem 0.7rem',
+                          borderRadius: '8px',
+                          background: 'var(--bg-surface)',
+                          border:
+                            w.wishType === 'no_go'
+                              ? '1px solid rgba(220, 38, 38, 0.45)'
+                              : '1px solid rgba(22, 163, 74, 0.45)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '0.35rem',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
+                          <div style={{ fontSize: '0.83rem', fontWeight: 600 }}>
+                            <span
+                              style={{
+                                color: w.wishType === 'no_go' ? 'var(--accent-danger)' : 'var(--accent-success)',
+                                marginRight: '6px',
+                              }}
+                            >
+                              {w.wishType === 'no_go' ? 'Passt nicht:' : 'Passt gut:'}
+                            </span>
+                            {formatWishDateLabel(w.weekId, w.day)} ·{' '}
+                            <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
+                              {w.className ? `Klasse ${w.className}` : 'Alle meine Klassen'}
+                            </span>
+                          </div>
+                          {plan.isActive && (
+                            <button
+                              type="button"
+                              onClick={() => removeWish(w.id)}
+                              title="Entfernen"
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--text-secondary)',
+                                padding: '4px',
+                                minWidth: '28px',
+                                minHeight: '28px',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                              }}
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          )}
+                        </div>
+
+                        <input
+                          type="text"
+                          disabled={!plan.isActive}
+                          value={w.note}
+                          onChange={(e) => updateWishNote(w.id, e.target.value)}
+                          placeholder="Grund (optional, z. B. Fortbildung, Ausflug)..."
+                          className="ui-input"
+                          style={{ fontSize: '16px', padding: '0.4rem 0.6rem' }}
+                        />
+
+                        {w.resolutionStatus && w.resolutionStatus !== 'open' && (
+                          <div
+                            style={{
+                              fontSize: '0.76rem',
+                              fontWeight: 600,
+                              color: w.resolutionStatus === 'applied' ? 'var(--accent-success)' : 'var(--accent-warning)',
+                            }}
+                          >
+                            Planung: {w.resolutionStatus === 'applied' ? 'Übernommen ✓' : 'Nicht möglich'}
+                            {w.resolutionNote ? ` – ${w.resolutionNote}` : ''}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Submit Area */}
+        {plan.isActive && (
+          <section
+            className="ui-card"
+            style={{
+              padding: '0.9rem 1rem',
+              marginBottom: '0.9rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.65rem',
+            }}
+          >
+            <input
+              type="text"
+              value={generalNote}
+              onChange={(e) => setGeneralNote(e.target.value)}
+              placeholder="Allgemeiner Hinweis an die Planung (optional)..."
+              className="ui-input"
+              style={{ fontSize: '16px', padding: '0.6rem 0.75rem' }}
+            />
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={submitting}
+              className="ui-btn ui-btn-primary"
+              style={{
+                width: '100%',
+                minHeight: '46px',
+                fontSize: '0.96rem',
+                fontWeight: 700,
+              }}
+            >
+              <Send size={16} />
+              {submitting
+                ? 'Speichere...'
+                : savedSubmission
+                  ? 'Rückmeldung aktualisieren'
+                  : 'Rückmeldung absenden'}
+            </button>
+          </section>
+        )}
+      </div>
+
+      {/* Bottom Collapsed Overview: Full Read-Only Schedule for All Classes */}
+      <div style={{ maxWidth: showFullSchedule ? '1440px' : '720px', margin: '0 auto', width: '100%' }}>
+        <section className="ui-card" style={{ overflow: 'hidden' }}>
+          <button
+            type="button"
+            onClick={() => setShowFullSchedule((v) => !v)}
+            style={{
+              width: '100%',
+              minHeight: '48px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '0.85rem 1rem',
+              background: 'transparent',
+              border: 'none',
+              borderBottom: showFullSchedule ? '1px solid var(--border-subtle)' : 'none',
+              color: 'var(--text-primary)',
+              fontSize: '0.92rem',
+              fontWeight: 700,
+              textAlign: 'left',
+              gap: '0.5rem',
+            }}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Calendar size={17} color="var(--text-secondary)" />
+              <span>Gesamtübersicht (alle {plan.snapshot.classes.length} Klassen)</span>
+            </span>
+            {showFullSchedule ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+          </button>
+
+          {showFullSchedule && (
+            <>
+              <div
+                style={{
+                  display: 'flex',
+                  gap: '0.5rem',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  padding: '0.75rem 1rem',
+                  background: 'var(--bg-panel)',
+                  borderBottom: '1px solid var(--border-subtle)',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setOnlyMyClassesInOverview(false)}
+                  style={{
+                    padding: '0.35rem 0.7rem',
+                    borderRadius: '6px',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    border: '1px solid var(--border-color)',
+                    background: !onlyMyClassesInOverview ? 'var(--accent-primary)' : 'var(--bg-surface)',
+                    color: !onlyMyClassesInOverview ? 'white' : 'var(--text-secondary)',
+                  }}
+                >
+                  Alle Klassen
+                </button>
+                {myClasses.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setOnlyMyClassesInOverview(true)}
+                    style={{
+                      padding: '0.35rem 0.7rem',
+                      borderRadius: '6px',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                      border: '1px solid var(--border-color)',
+                      background: onlyMyClassesInOverview ? 'var(--accent-primary)' : 'var(--bg-surface)',
+                      color: onlyMyClassesInOverview ? 'white' : 'var(--text-secondary)',
+                    }}
+                  >
+                    Nur meine Klassen ({myClasses.length})
+                  </button>
+                )}
+                <label
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '0.8rem',
+                    color: 'var(--text-secondary)',
+                    marginLeft: '0.25rem',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={highlightMyExams}
+                    onChange={(e) => setHighlightMyExams(e.target.checked)}
+                  />
+                  Meine Klausuren hervorheben
+                </label>
+              </div>
+
+              <div
+                style={{
+                  overflow: 'auto',
+                  maxHeight: '65vh',
+                  background: 'var(--bg-card)',
+                  WebkitOverflowScrolling: 'touch',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: `96px repeat(${plan.snapshot.weeks.length * 5}, minmax(72px, 1fr))`,
+                    minWidth: 'fit-content',
+                  }}
+                >
+                  {/* Corner */}
+                  <div
+                    style={{
+                      position: 'sticky',
+                      top: 0,
+                      left: 0,
+                      zIndex: 20,
+                      background: 'var(--bg-card)',
+                      borderRight: '1px solid var(--border-color)',
+                      borderBottom: '1px solid var(--border-color)',
+                      padding: '0.5rem 0.6rem',
+                      fontWeight: 700,
+                      fontSize: '0.82rem',
+                      gridColumn: '1 / 2',
+                      gridRow: '1 / 3',
+                      alignContent: 'center',
+                    }}
+                  >
+                    Klasse
+                  </div>
+
+                  {/* Weeks */}
+                  {plan.snapshot.weeks.map((week, idx) => (
+                    <div
+                      key={week.id}
+                      style={{
+                        gridColumn: `${2 + idx * 5} / span 5`,
+                        gridRow: '1 / 2',
+                        position: 'sticky',
+                        top: 0,
+                        zIndex: 10,
+                        background: 'var(--bg-card)',
+                        borderRight: '1px solid var(--border-color)',
+                        borderBottom: '1px solid var(--border-color)',
+                        padding: '0.35rem 0.5rem',
+                        textAlign: 'center',
+                        fontSize: '0.78rem',
+                        fontWeight: 700,
+                        color: week.isBlocked ? 'var(--accent-danger)' : 'var(--text-primary)',
+                      }}
+                    >
+                      KW {week.weekNumber}{' '}
+                      <span style={{ fontWeight: 400, color: 'var(--text-secondary)', fontSize: '0.72rem' }}>
+                        ({getWeekDateRangeString(week)})
+                      </span>
+                    </div>
+                  ))}
+
+                  {/* Days */}
+                  {plan.snapshot.weeks.map((week, wIdx) =>
+                    DAYS_OF_WEEK.map((day, dIdx) => {
+                      const dayDate = getWeekDayDate(week, day);
+                      const isGlobalBlocked = week.isBlocked || Boolean(plan.snapshot.blockedDays[week.id]?.[day]);
+                      return (
+                        <div
+                          key={`${week.id}-${day}`}
+                          style={{
+                            gridColumn: `${2 + wIdx * 5 + dIdx} / span 1`,
+                            gridRow: '2 / 3',
+                            position: 'sticky',
+                            top: '29px',
+                            zIndex: 10,
+                            background: isGlobalBlocked ? 'var(--accent-danger-soft)' : 'var(--bg-panel)',
+                            borderRight: '1px solid var(--border-color)',
+                            borderBottom: '1px solid var(--border-color)',
+                            padding: '0.25rem',
+                            textAlign: 'center',
+                            fontSize: '0.72rem',
+                            color: isGlobalBlocked ? 'var(--accent-danger)' : 'var(--text-secondary)',
+                          }}
+                        >
+                          <div style={{ fontWeight: 600 }}>{GERMAN_DAY_SHORT[day]}</div>
+                          <div>{formatShortDate(dayDate)}</div>
+                        </div>
+                      );
+                    })
+                  )}
+
+                  {/* Rows */}
+                  {overviewClasses.map((cls, cIdx) => {
+                    const row = 3 + cIdx;
+                    return (
+                      <div key={cls.className} style={{ display: 'contents' }}>
+                        <div
+                          style={{
+                            gridColumn: '1 / 2',
+                            gridRow: `${row} / ${row + 1}`,
+                            position: 'sticky',
+                            left: 0,
+                            zIndex: 5,
+                            background: 'var(--bg-panel)',
+                            borderRight: '1px solid var(--border-color)',
+                            borderBottom: '1px solid var(--border-color)',
+                            padding: '0.45rem 0.6rem',
+                            fontWeight: 600,
+                            fontSize: '0.8rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                          }}
+                        >
+                          {cls.className}
+                        </div>
+
+                        {plan.snapshot.weeks.map((week, wIdx) =>
+                          DAYS_OF_WEEK.map((day, dIdx) => {
+                            const isBlocked =
+                              week.isBlocked ||
+                              Boolean(plan.snapshot.blockedDays[week.id]?.[day]) ||
+                              Boolean(plan.snapshot.blockedClassDays[cls.className]?.[week.id]?.[day]);
+
+                            const cellExams = plan.snapshot.exams.filter(
+                              (e) => e.className === cls.className && e.assignedWeekId === week.id && e.assignedDay === day
+                            );
+
+                            return (
+                              <div
+                                key={`${cls.className}-${week.id}-${day}`}
+                                style={{
+                                  gridColumn: `${2 + wIdx * 5 + dIdx} / span 1`,
+                                  gridRow: `${row} / ${row + 1}`,
+                                  minHeight: '44px',
+                                  padding: '3px',
+                                  borderRight: '1px solid var(--border-color)',
+                                  borderBottom: '1px solid var(--border-color)',
+                                  background: isBlocked
+                                    ? 'repeating-linear-gradient(45deg, var(--stripe-a), var(--stripe-a) 8px, var(--stripe-b) 8px, var(--stripe-b) 16px)'
+                                    : 'transparent',
+                                  opacity: isBlocked ? 0.55 : 1,
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: '3px',
+                                }}
+                              >
+                                {cellExams.map((exam) => {
+                                  const isMine = myExamIdsSet.has(exam.id);
+                                  const teachers = getExamTeachersNormalized(
+                                    exam,
+                                    plan.snapshot.classes,
+                                    plan.snapshot.weeks
+                                  );
+                                  const fb = examFeedbackMap[exam.id];
+                                  return (
+                                    <div
+                                      key={exam.id}
+                                      style={{
+                                        padding: '3px 5px',
+                                        borderRadius: '4px',
+                                        fontSize: '0.72rem',
+                                        background:
+                                          highlightMyExams && isMine
+                                            ? 'var(--accent-soft)'
+                                            : 'var(--bg-panel)',
+                                        border:
+                                          fb?.status === 'not_ok'
+                                            ? '1px solid var(--accent-danger)'
+                                            : fb?.status === 'ok'
+                                              ? '1px solid var(--accent-success)'
+                                              : highlightMyExams && isMine
+                                                ? '1px solid var(--accent-primary)'
+                                                : '1px solid var(--border-color)',
+                                      }}
+                                    >
+                                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{exam.subject}</div>
+                                      {teachers.length > 0 && (
+                                        <div style={{ fontSize: '0.66rem', color: 'var(--text-secondary)' }}>
+                                          {teachers.join(', ')}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
                     );
                   })}
                 </div>
               </div>
-            ))}
-          </div>
-
-          {/* Selected Wishes List */}
-          {dayWishes.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                Deine eingetragenen Termine ({dayWishes.length}):
-              </div>
-              {dayWishes.map((w) => (
-                <div
-                  key={w.id}
-                  style={{
-                    padding: '0.6rem 0.75rem',
-                    borderRadius: '6px',
-                    background: 'var(--bg-app)',
-                    border: w.wishType === 'no_go' ? '1px solid rgba(239, 68, 68, 0.5)' : '1px solid rgba(59, 130, 246, 0.5)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '0.4rem',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
-                    <div style={{ fontSize: '0.84rem', fontWeight: 600 }}>
-                      <span style={{ color: w.wishType === 'no_go' ? 'var(--accent-danger)' : 'var(--accent-primary)', marginRight: '6px' }}>
-                        {w.wishType === 'no_go' ? 'Auf keinen Fall:' : 'Wunschtermin:'}
-                      </span>
-                      {formatWishDateLabel(w.weekId, w.day)} ·{' '}
-                      <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
-                        {w.className ? `Klasse ${w.className}` : 'Alle meine Klassen'}
-                      </span>
-                    </div>
-                    {plan.isActive && (
-                      <button
-                        type="button"
-                        onClick={() => removeWish(w.id)}
-                        title="Entfernen"
-                        style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', padding: '2px' }}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </div>
-
-                  <input
-                    type="text"
-                    disabled={!plan.isActive}
-                    value={w.note}
-                    onChange={(e) => updateWishNote(w.id, e.target.value)}
-                    placeholder="Grund / Hinweis (optional, z. B. Fortbildung, Exkursion)..."
-                    style={{
-                      width: '100%',
-                      padding: '0.4rem 0.6rem',
-                      borderRadius: '5px',
-                      border: '1px solid var(--border-color)',
-                      background: 'var(--bg-panel)',
-                      color: 'var(--text-primary)',
-                      fontSize: '0.8rem',
-                    }}
-                  />
-
-                  {w.resolutionStatus && w.resolutionStatus !== 'open' && (
-                    <div
-                      style={{
-                        fontSize: '0.76rem',
-                        color: w.resolutionStatus === 'applied' ? 'var(--accent-success)' : 'var(--accent-warning)',
-                      }}
-                    >
-                      Planung: {w.resolutionStatus === 'applied' ? 'Übernommen ✓' : 'Nicht möglich'}
-                      {w.resolutionNote ? ` – ${w.resolutionNote}` : ''}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+            </>
           )}
         </section>
       </div>
-
-      {/* Bottom Submit Area */}
-      {plan.isActive && (
-        <section
-          style={{
-            marginTop: '1.25rem',
-            padding: '1.15rem 1.25rem',
-            background: 'var(--bg-panel)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '10px',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '0.85rem',
-            alignItems: 'center',
-          }}
-        >
-          <input
-            type="text"
-            value={generalNote}
-            onChange={(e) => setGeneralNote(e.target.value)}
-            placeholder="Allgemeiner Hinweis an die Planung (optional)..."
-            style={{
-              flex: 1,
-              minWidth: '240px',
-              padding: '0.65rem 0.85rem',
-              borderRadius: '6px',
-              border: '1px solid var(--border-color)',
-              background: 'var(--bg-app)',
-              color: 'var(--text-primary)',
-              fontSize: '0.9rem',
-            }}
-          />
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={submitting}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '8px',
-              background: 'var(--accent-primary)',
-              color: 'white',
-              border: 'none',
-              padding: '0.75rem 1.4rem',
-              borderRadius: '8px',
-              fontWeight: 700,
-              fontSize: '0.95rem',
-              opacity: submitting ? 0.65 : 1,
-            }}
-          >
-            <Send size={16} />
-            {submitting
-              ? 'Speichere...'
-              : savedSubmission
-                ? 'Rückmeldung aktualisieren'
-                : 'Rückmeldung absenden'}
-          </button>
-        </section>
-      )}
     </div>
   );
 }
