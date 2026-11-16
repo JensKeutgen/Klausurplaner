@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Trash2, Calendar, ChevronDown, ChevronRight, Search, Users } from 'lucide-react';
-import { type ClassSchedule, DAYS_OF_WEEK, type DayOfWeek } from '../types';
+import { type ClassSchedule, DAYS_OF_WEEK, type DayOfWeek, type Week } from '../types';
 import {
     DndContext,
     useDraggable,
@@ -10,10 +10,12 @@ import {
     type DragStartEvent,
 } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import { getAllTeachersForSubject, getEffectiveGradeLevel } from '../logic/solver';
+import { getAllSubjectsForClass, getAllTeachersForSubject, getEffectiveGradeLevel } from '../logic/solver';
+import { getWeekDateRangeString } from '../logic/dateUtils';
 
 interface ScheduleEditorProps {
     classes: ClassSchedule[];
+    weeks?: Week[];
     onUpdateClass: (updatedClass: ClassSchedule) => void;
 }
 
@@ -109,8 +111,9 @@ const GERMAN_DAYS: Record<DayOfWeek, string> = {
     Friday: 'Freitag',
 };
 
-export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) {
+export function ScheduleEditor({ classes, weeks = [], onUpdateClass }: ScheduleEditorProps) {
     const [expandedClass, setExpandedClass] = useState<string | null>(null);
+    const [selectedWeekByClass, setSelectedWeekByClass] = useState<Record<string, string>>({});
     const [activeSubjectName, setActiveSubjectName] = useState<string | null>(null);
     const [search, setSearch] = useState('');
     const [gradeFilter, setGradeFilter] = useState('Alle');
@@ -136,6 +139,19 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
             .sort((a, b) => a.className.localeCompare(b.className));
     }, [classes, search, gradeFilter]);
 
+    const getActiveWeekKey = (cls: ClassSchedule): string => {
+        const saved = selectedWeekByClass[cls.className];
+        if (saved && (saved === 'default' || cls.weeklySchedules?.[saved])) {
+            return saved;
+        }
+        const weekIds = Object.keys(cls.weeklySchedules || {});
+        if (weekIds.length > 0) {
+            const firstInOrder = weeks.find((w) => cls.weeklySchedules?.[w.id])?.id;
+            return firstInOrder || weekIds[0];
+        }
+        return 'default';
+    };
+
     const toggleExpand = (className: string) => {
         setExpandedClass(expandedClass === className ? null : className);
     };
@@ -144,26 +160,27 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
         className: string,
         day: DayOfWeek,
         subjectIndex: number,
-        weekType: 'A' | 'B'
+        weekKey: string
     ) => {
         const cls = classes.find((c) => c.className === className);
         if (!cls) return;
 
         const newCls = { ...cls };
 
-        if (weekType === 'A') {
+        if (weekKey === 'default') {
             const newSubjects = { ...newCls.subjects };
             const daySubjects = [...(newSubjects[day] || [])];
             daySubjects.splice(subjectIndex, 1);
             newSubjects[day] = daySubjects;
             newCls.subjects = newSubjects;
-        } else {
-            if (!newCls.subjectsB) return;
-            const newSubjectsB = { ...newCls.subjectsB };
-            const daySubjects = [...(newSubjectsB[day] || [])];
+        } else if (newCls.weeklySchedules?.[weekKey]) {
+            const nextWeekly = { ...newCls.weeklySchedules };
+            const wData = { ...nextWeekly[weekKey], subjects: { ...nextWeekly[weekKey].subjects } };
+            const daySubjects = [...(wData.subjects[day] || [])];
             daySubjects.splice(subjectIndex, 1);
-            newSubjectsB[day] = daySubjects;
-            newCls.subjectsB = newSubjectsB;
+            wData.subjects[day] = daySubjects;
+            nextWeekly[weekKey] = wData;
+            newCls.weeklySchedules = nextWeekly;
         }
 
         onUpdateClass(newCls);
@@ -186,11 +203,11 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
 
         if (activeParts.length < 5 || overParts.length < 4) return;
 
-        const [, srcClass, srcWeekType, srcDay, srcIndexStr] = activeParts;
-        const [, destClass, destWeekType, destDay] = overParts;
+        const [, srcClass, srcWeekKey, srcDay, srcIndexStr] = activeParts;
+        const [, destClass, destWeekKey, destDay] = overParts;
 
         if (srcClass !== destClass) return;
-        if (srcWeekType !== destWeekType) return;
+        if (srcWeekKey !== destWeekKey) return;
         if (srcDay === destDay) return;
 
         const cls = classes.find((c) => c.className === srcClass);
@@ -198,102 +215,106 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
 
         const srcIndex = parseInt(srcIndexStr, 10);
         const newCls = { ...cls };
-        const weekType = srcWeekType as 'A' | 'B';
 
-        const subjectsMap =
-            weekType === 'A' ? { ...newCls.subjects } : { ...(newCls.subjectsB || {}) };
+        if (srcWeekKey === 'default') {
+            const subjectsMap = { ...newCls.subjects };
+            const sourceList = [...(subjectsMap[srcDay as DayOfWeek] || [])];
+            const subject = sourceList[srcIndex];
+            sourceList.splice(srcIndex, 1);
+            subjectsMap[srcDay as DayOfWeek] = sourceList;
 
-        const sourceList = [...(subjectsMap[srcDay as DayOfWeek] || [])];
-        const subject = sourceList[srcIndex];
-        sourceList.splice(srcIndex, 1);
-        subjectsMap[srcDay as DayOfWeek] = sourceList;
+            const destList = [...(subjectsMap[destDay as DayOfWeek] || [])];
+            destList.push(subject);
+            subjectsMap[destDay as DayOfWeek] = destList;
+            newCls.subjects = subjectsMap;
+        } else if (newCls.weeklySchedules?.[srcWeekKey]) {
+            const nextWeekly = { ...newCls.weeklySchedules };
+            const wData = { ...nextWeekly[srcWeekKey], subjects: { ...nextWeekly[srcWeekKey].subjects } };
+            const sourceList = [...(wData.subjects[srcDay as DayOfWeek] || [])];
+            const subject = sourceList[srcIndex];
+            sourceList.splice(srcIndex, 1);
+            wData.subjects[srcDay as DayOfWeek] = sourceList;
 
-        const destList = [...(subjectsMap[destDay as DayOfWeek] || [])];
-        destList.push(subject);
-        subjectsMap[destDay as DayOfWeek] = destList;
-
-        if (weekType === 'A') {
-            newCls.subjects = subjectsMap as Record<DayOfWeek, string[]>;
-        } else {
-            newCls.subjectsB = subjectsMap as Record<DayOfWeek, string[]>;
+            const destList = [...(wData.subjects[destDay as DayOfWeek] || [])];
+            destList.push(subject);
+            wData.subjects[destDay as DayOfWeek] = destList;
+            nextWeekly[srcWeekKey] = wData;
+            newCls.weeklySchedules = nextWeekly;
         }
 
         onUpdateClass(newCls);
     };
 
-    const renderScheduleGrid = (cls: ClassSchedule, weekType: 'A' | 'B') => {
-        const subjectsMap = weekType === 'A' ? cls.subjects : cls.subjectsB;
+    const renderScheduleGrid = (cls: ClassSchedule, weekKey: string) => {
+        const weekData = weekKey !== 'default' ? cls.weeklySchedules?.[weekKey] : null;
+        const subjectsMap = weekData ? weekData.subjects : cls.subjects;
+        const teachersMap = weekData ? weekData.subjectTeachers : cls.subjectTeachers;
+        const freeDaysMap = weekData?.freeDays;
         if (!subjectsMap) return null;
 
         return (
-            <div style={{ marginBottom: '1rem' }}>
-                <div
-                    style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        fontSize: '0.78rem',
-                        fontWeight: 700,
-                        color: weekType === 'A' ? 'var(--accent-primary)' : 'var(--accent-purple)',
-                        marginBottom: '0.5rem',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.4px',
-                    }}
-                >
-                    Woche {weekType}
-                </div>
+            <div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.75rem', minWidth: '620px' }}>
-                    {DAYS_OF_WEEK.map((day) => (
-                        <div key={day} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                            <div
-                                style={{
-                                    fontSize: '0.78rem',
-                                    fontWeight: 700,
-                                    color: 'var(--text-secondary)',
-                                    paddingBottom: '2px',
-                                }}
-                            >
-                                {GERMAN_DAYS[day]}
-                            </div>
+                    {DAYS_OF_WEEK.map((day) => {
+                        const freeReason = freeDaysMap?.[day];
+                        return (
+                            <div key={day} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                <div
+                                    style={{
+                                        fontSize: '0.78rem',
+                                        fontWeight: 700,
+                                        color: freeReason ? 'var(--holiday-text)' : 'var(--text-secondary)',
+                                        paddingBottom: '2px',
+                                    }}
+                                >
+                                    {GERMAN_DAYS[day]}
+                                </div>
 
-                            <DroppableDay id={`day::${cls.className}::${weekType}::${day}`}>
-                                {(subjectsMap[day] || []).length === 0 && (
-                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                                        —
-                                    </span>
-                                )}
-                                {subjectsMap[day]?.map((subject, idx) => {
-                                    const teachers = (weekType === 'B' ? cls.subjectTeachersB : cls.subjectTeachers)?.[day]?.[subject] || [];
-                                    const chosenTeacher = cls.examTeacherBySubject?.[subject];
-                                    const isPinnedTeacher = Boolean(chosenTeacher && teachers.includes(chosenTeacher));
-                                    return (
-                                        <DraggableSubject
-                                            key={`${weekType}-${day}-${idx}`}
-                                            id={`subject::${cls.className}::${weekType}::${day}::${idx}::${subject}`}
-                                            onDelete={() => removeSubject(cls.className, day, idx, weekType)}
-                                            isPinnedTeacher={isPinnedTeacher}
+                                <DroppableDay id={`day::${cls.className}::${weekKey}::${day}`}>
+                                    {(subjectsMap[day] || []).length === 0 && (
+                                        <span
+                                            style={{
+                                                fontSize: '0.76rem',
+                                                color: freeReason ? 'var(--holiday-text)' : 'var(--text-muted)',
+                                                fontStyle: 'italic',
+                                            }}
                                         >
-                                            <span>
-                                                <strong>{subject}</strong>
-                                                {teachers.length > 0 && (
-                                                    <span
-                                                        style={{
-                                                            fontSize: '0.72rem',
-                                                            color: isPinnedTeacher ? 'var(--accent-primary)' : 'var(--text-muted)',
-                                                            marginLeft: '5px',
-                                                            fontWeight: isPinnedTeacher ? 700 : 400,
-                                                        }}
-                                                    >
-                                                        ({teachers.join(', ')})
-                                                    </span>
-                                                )}
-                                            </span>
-                                        </DraggableSubject>
-                                    );
-                                })}
-                            </DroppableDay>
-                        </div>
-                    ))}
+                                            {freeReason || '—'}
+                                        </span>
+                                    )}
+                                    {subjectsMap[day]?.map((subject, idx) => {
+                                        const teachers = teachersMap?.[day]?.[subject] || [];
+                                        const chosenTeacher = cls.examTeacherBySubject?.[subject];
+                                        const isPinnedTeacher = Boolean(chosenTeacher && teachers.includes(chosenTeacher));
+                                        return (
+                                            <DraggableSubject
+                                                key={`${weekKey}-${day}-${idx}`}
+                                                id={`subject::${cls.className}::${weekKey}::${day}::${idx}::${subject}`}
+                                                onDelete={() => removeSubject(cls.className, day, idx, weekKey)}
+                                                isPinnedTeacher={isPinnedTeacher}
+                                            >
+                                                <span>
+                                                    <strong>{subject}</strong>
+                                                    {teachers.length > 0 && (
+                                                        <span
+                                                            style={{
+                                                                fontSize: '0.72rem',
+                                                                color: isPinnedTeacher ? 'var(--accent-primary)' : 'var(--text-muted)',
+                                                                marginLeft: '5px',
+                                                                fontWeight: isPinnedTeacher ? 700 : 400,
+                                                            }}
+                                                        >
+                                                            ({teachers.join(', ')})
+                                                        </span>
+                                                    )}
+                                                </span>
+                                            </DraggableSubject>
+                                        );
+                                    })}
+                                </DroppableDay>
+                            </div>
+                        );
+                    })}
                 </div>
             </div>
         );
@@ -302,7 +323,7 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
     if (classes.length === 0) {
         return (
             <div className="ui-card" style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                Importiere zuerst Stundenpläne im Tab <strong>1. Import & Ferien</strong>, um sie hier zu prüfen oder anzupassen.
+                Importiere zuerst Stundenpläne im Tab <strong>1. Import & Zeitraum</strong>, um sie hier zu prüfen oder anzupassen.
             </div>
         );
     }
@@ -317,7 +338,7 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
                             Stundenpläne & Stufen prüfen ({classes.length} Klassen)
                         </h3>
                         <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                            Klicke eine Klasse an, um Stunden per Drag & Drop zu verschieben. Die <strong>Stufe</strong> steuert gemeinsame Klausurwochen pro Fach.
+                            Wähle eine Klasse, um ihren konkreten Unterricht pro Kalenderwoche (inkl. schulfreier Tage) einzusehen oder per Drag & Drop anzupassen.
                         </p>
                     </div>
 
@@ -362,12 +383,22 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
                         const isExpanded = expandedClass === cls.className;
                         const effectiveGrade = getEffectiveGradeLevel(cls, cls.className);
                         const pinnedEntries = Object.entries(cls.examTeacherBySubject || {});
-                        const multiSubjects = Array.from(
-                            new Set([
-                                ...Object.values(cls.subjects).flat(),
-                                ...(cls.subjectsB ? Object.values(cls.subjectsB).flat() : []),
-                            ])
-                        ).filter((s) => getAllTeachersForSubject(cls, s).length >= 2);
+                        const multiSubjects = getAllSubjectsForClass(cls).filter(
+                            (s) => getAllTeachersForSubject(cls, s).length >= 2
+                        );
+
+                        const fetchedWeekIds = Object.keys(cls.weeklySchedules || {});
+                        const orderedWeeks = weeks.filter((w) => cls.weeklySchedules?.[w.id]);
+                        const weekOptions =
+                            orderedWeeks.length > 0
+                                ? orderedWeeks
+                                : fetchedWeekIds.map((id) => ({
+                                      id,
+                                      weekNumber: Number(id.split('KW')[1]) || 0,
+                                      year: Number(id.split('-')[0]) || 2026,
+                                      isBlocked: false,
+                                  }));
+                        const activeWeekKey = getActiveWeekKey(cls);
 
                         return (
                             <div
@@ -397,18 +428,18 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
                                 >
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                         <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>{cls.className}</span>
-                                        {cls.subjectsB && (
+                                        {fetchedWeekIds.length > 0 && (
                                             <span
                                                 style={{
                                                     fontSize: '0.7rem',
                                                     fontWeight: 700,
-                                                    background: 'var(--accent-purple-soft)',
-                                                    color: 'var(--accent-purple)',
+                                                    background: 'var(--accent-soft)',
+                                                    color: 'var(--accent-primary)',
                                                     padding: '2px 7px',
                                                     borderRadius: '999px',
                                                 }}
                                             >
-                                                A/B Woche
+                                                {fetchedWeekIds.length} Wochen exakt
                                             </span>
                                         )}
                                         {pinnedEntries.length > 0 && (
@@ -468,11 +499,40 @@ export function ScheduleEditor({ classes, onUpdateClass }: ScheduleEditorProps) 
 
                                 {isExpanded && (
                                     <div style={{ padding: '1rem', overflowX: 'auto', borderTop: '1px solid var(--border-subtle)' }}>
-                                        {renderScheduleGrid(cls, 'A')}
-                                        {cls.subjectsB && (
-                                            <div style={{ height: '1px', background: 'var(--border-subtle)', margin: '0.75rem 0' }} />
+                                        {weekOptions.length > 0 && (
+                                            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.85rem' }}>
+                                                {weekOptions.map((w) => {
+                                                    const active = activeWeekKey === w.id;
+                                                    return (
+                                                        <button
+                                                            key={w.id}
+                                                            type="button"
+                                                            onClick={() =>
+                                                                setSelectedWeekByClass((prev) => ({
+                                                                    ...prev,
+                                                                    [cls.className]: w.id,
+                                                                }))
+                                                            }
+                                                            style={{
+                                                                padding: '4px 10px',
+                                                                borderRadius: '6px',
+                                                                fontSize: '0.76rem',
+                                                                fontWeight: active ? 700 : 500,
+                                                                border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-color)'}`,
+                                                                background: active ? 'var(--accent-soft)' : 'var(--bg-panel)',
+                                                                color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                                            }}
+                                                        >
+                                                            KW {w.weekNumber}{' '}
+                                                            <span style={{ fontSize: '0.7rem', opacity: 0.85 }}>
+                                                                ({getWeekDateRangeString(w)})
+                                                            </span>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
                                         )}
-                                        {cls.subjectsB && renderScheduleGrid(cls, 'B')}
+                                        {renderScheduleGrid(cls, activeWeekKey)}
                                     </div>
                                 )}
                             </div>

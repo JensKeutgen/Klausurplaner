@@ -24,7 +24,6 @@ interface ConfigSectionProps {
     onUpdateWeeks: (weeks: Week[]) => void;
     blockedDays: BlockedDays;
     holidayLabels?: HolidayLabels;
-    weekAParity?: 'odd' | 'even';
     edupageSyncLoading?: boolean;
     edupageSyncMessage?: string | null;
     pdfSettings: PdfSettings;
@@ -39,7 +38,6 @@ export function ConfigSection({
     onUpdateWeeks,
     blockedDays,
     holidayLabels = {},
-    weekAParity = 'odd',
     edupageSyncLoading = false,
     edupageSyncMessage = null,
     pdfSettings,
@@ -53,31 +51,31 @@ export function ConfigSection({
         }
         return new Date();
     });
-    const [selectionStart, setSelectionStart] = useState<Date | null>(() =>
-        weeks.length > 0 ? getWeekDayDate(weeks[0], 0) : null
-    );
-    const [selectionEnd, setSelectionEnd] = useState<Date | null>(() =>
-        weeks.length > 0 ? getWeekDayDate(weeks[weeks.length - 1], 4) : null
-    );
+    const [pendingStart, setPendingStart] = useState<Date | null>(null);
+
+    const selectionStart =
+        pendingStart ?? (weeks.length > 0 ? getWeekDayDate(weeks[0], 0) : null);
+    const selectionEnd = pendingStart
+        ? null
+        : weeks.length > 0
+          ? getWeekDayDate(weeks[weeks.length - 1], 4)
+          : null;
 
     const updateWeeks = (start: Date, end: Date) => {
-        const newWeeks = getWeeksBetween(start, end, weeks, { weekAParity });
+        const newWeeks = getWeeksBetween(start, end, weeks);
         onUpdateWeeks(newWeeks);
     };
 
     const handleDateClick = (date: Date) => {
-        if (!selectionStart || (selectionStart && selectionEnd)) {
-            setSelectionStart(date);
-            setSelectionEnd(null);
+        if (!pendingStart) {
+            setPendingStart(date);
         } else {
-            if (date < selectionStart) {
-                setSelectionStart(date);
-                setSelectionEnd(selectionStart);
-                updateWeeks(date, selectionStart);
+            if (date < pendingStart) {
+                updateWeeks(date, pendingStart);
             } else {
-                setSelectionEnd(date);
-                updateWeeks(selectionStart, date);
+                updateWeeks(pendingStart, date);
             }
+            setPendingStart(null);
         }
     };
 
@@ -95,10 +93,6 @@ export function ConfigSection({
 
     const toggleBlockWeek = (id: string) => {
         onUpdateWeeks(weeks.map((w) => (w.id === id ? { ...w, isBlocked: !w.isBlocked } : w)));
-    };
-
-    const toggleWeekType = (id: string) => {
-        onUpdateWeeks(weeks.map((w) => (w.id === id ? { ...w, weekType: w.weekType === 'A' ? 'B' : 'A' } : w)));
     };
 
     const renderMonth = (offset: number) => {
@@ -322,22 +316,6 @@ export function ConfigSection({
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                                     <span style={{ fontWeight: 700, fontSize: '0.88rem' }}>KW {week.weekNumber}</span>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => toggleWeekType(week.id)}
-                                                        style={{
-                                                            fontSize: '0.7rem',
-                                                            padding: '1px 7px',
-                                                            borderRadius: '5px',
-                                                            background: week.weekType === 'A' ? 'var(--accent-primary)' : 'var(--accent-purple)',
-                                                            color: '#fff',
-                                                            border: 'none',
-                                                            fontWeight: 700,
-                                                        }}
-                                                        title="Wochentyp umschalten (A/B)"
-                                                    >
-                                                        {week.weekType}
-                                                    </button>
                                                 </div>
                                                 <span style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
                                                     {getWeekDateRangeString(week)}

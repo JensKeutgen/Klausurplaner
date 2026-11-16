@@ -4,14 +4,25 @@ export const DAYS_OF_WEEK: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thu
 
 export type SubjectTimingPreference = 'normal' | 'early' | 'late';
 
+export interface WeekScheduleData {
+  subjects: {
+    [key in DayOfWeek]: string[];
+  };
+  subjectTeachers?: Partial<Record<DayOfWeek, Record<string, string[]>>>;
+  /** Reason if class has no regular lessons on a specific day (e.g. Ferien, Ausflug, Kein Unterricht) */
+  freeDays?: Partial<Record<DayOfWeek, string>>;
+}
+
 export interface ClassSchedule {
   className: string;
-  gradeLevel?: string; // Stufe (e.g. "11", "BG25", "ITA24") - auto-inferred if omitted
+  gradeLevel?: string; // Stufe (e.g. "11", "BG25", "ITA24", "AIT1") - auto-inferred if omitted
   subjects: {
-    [key in DayOfWeek]: string[]; // Array of subjects for that day (Week A default)
+    [key in DayOfWeek]: string[]; // Default / fallback schedule
   };
+  /** Concrete per-week schedule fetched from EduPage keyed by Week.id (e.g. "2026-KW46") */
+  weeklySchedules?: Record<string, WeekScheduleData>;
   subjectsB?: {
-    [key in DayOfWeek]: string[]; // Array of subjects for Week B
+    [key in DayOfWeek]: string[]; // Legacy optional fallback
   };
   // Optional teacher labels per day -> subject (populated by EduPage import)
   subjectTeachers?: Partial<Record<DayOfWeek, Record<string, string[]>>>;
@@ -37,7 +48,7 @@ export interface Week {
   weekNumber: number;
   year: number;
   isBlocked: boolean; // Entire week blocked
-  weekType: 'A' | 'B'; // A/B Week toggle
+  weekType?: 'A' | 'B'; // Legacy optional field (unused when concrete weeklySchedules exist)
 }
 
 // Map of WeekId -> Day -> boolean (true if blocked globally)
@@ -77,6 +88,7 @@ export interface EdupageMeta {
   lastSyncAt?: string;
   lastHolidaySyncAt?: string;
   selectedClassIds?: string[];
+  useShortSubjects?: boolean;
   weekAReferenceDate?: string;
   weekBReferenceDate?: string;
   weekAParity?: 'odd' | 'even';

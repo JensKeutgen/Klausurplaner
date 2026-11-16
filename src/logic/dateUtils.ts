@@ -90,11 +90,11 @@ export function getWeeksBetween(
     start: Date,
     end: Date,
     existingWeeks: Week[] = [],
-    options?: { weekAParity?: 'odd' | 'even' }
+    _options?: { weekAParity?: 'odd' | 'even' }
 ): Week[] {
+    void _options;
     const weeks: Week[] = [];
     const current = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-    const parity = options?.weekAParity ?? 'odd';
 
     // Align to Monday of start week
     const day = current.getDay() || 7;
@@ -105,7 +105,7 @@ export function getWeeksBetween(
     const endNormalized = new Date(end.getFullYear(), end.getMonth(), end.getDate());
     const distinctWeeks = new Set<string>();
 
-    // Map existing weeks by year-weekNumber to preserve isBlocked & weekType
+    // Map existing weeks by year-weekNumber to preserve isBlocked
     const existingByKey = new Map<string, Week>();
     for (const w of existingWeeks) {
         existingByKey.set(`${w.year}-${w.weekNumber}`, w);
@@ -123,7 +123,6 @@ export function getWeeksBetween(
                 weekNumber,
                 year,
                 isBlocked: prev ? prev.isBlocked : false,
-                weekType: prev ? prev.weekType : getWeekTypeForNumber(weekNumber, parity),
             });
         }
 

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { BookOpen, Check, Clock, Users, CheckSquare, Square } from 'lucide-react';
 import type { ClassSchedule, SubjectTimingPreference } from '../types';
-import { getAllTeachersForSubject, getEffectiveGradeLevel } from '../logic/solver';
+import { getAllSubjectsForClass, getAllTeachersForSubject, getEffectiveGradeLevel } from '../logic/solver';
 
 interface SubjectSelectionProps {
     classes: ClassSchedule[];
@@ -25,15 +25,11 @@ export function SubjectSelection({
     const [gradeFilter, setGradeFilter] = useState<string>('Alle');
     const [onlyMultiTeacher, setOnlyMultiTeacher] = useState(false);
 
-    // Map className -> Set of taught subjects (A + B)
+    // Map className -> Set of taught subjects across all weeks
     const classTaughtMap = useMemo(() => {
         const map = new Map<string, Set<string>>();
         for (const cls of classes) {
-            const set = new Set<string>([
-                ...Object.values(cls.subjects).flat(),
-                ...(cls.subjectsB ? Object.values(cls.subjectsB).flat() : []),
-            ]);
-            map.set(cls.className, set);
+            map.set(cls.className, new Set<string>(getAllSubjectsForClass(cls)));
         }
         return map;
     }, [classes]);

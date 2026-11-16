@@ -72,6 +72,9 @@ export function generatePDF(state: AppState) {
                 const cls = state.classes.find(c => c.className === className);
                 const isTaught = cls
                     ? Object.values(cls.subjects).flat().includes(subject) ||
+                      Object.values(cls.weeklySchedules || {}).some((w) =>
+                          Object.values(w.subjects || {}).flat().includes(subject)
+                      ) ||
                       (cls.subjectsB ? Object.values(cls.subjectsB).flat().includes(subject) : false)
                     : false;
 

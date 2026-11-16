@@ -16,8 +16,8 @@ import {
     Calendar,
 } from 'lucide-react';
 import { LLM_PROMPT } from '../logic/prompt';
-import { formatISODate, getISOWeek, inferWeekParityFromDate } from '../logic/dateUtils';
-import type { ClassSchedule, EdupageMeta } from '../types';
+import { formatISODate, formatShortDate, getWeekDayDate, getWeeksBetween } from '../logic/dateUtils';
+import type { BlockedClassDays, BlockedDays, ClassSchedule, EdupageMeta, HolidayLabels, Week } from '../types';
 
 interface EdupageClassInfo {
     id: string;
@@ -26,23 +26,25 @@ interface EdupageClassInfo {
     gradeLevel: string;
 }
 
+export interface EdupageCalendarPayload {
+    blockedDays?: BlockedDays;
+    holidayLabels?: HolidayLabels;
+    blockedClassDays?: BlockedClassDays;
+}
+
 interface ImportSectionProps {
-    onImport: (schedules: ClassSchedule[], meta?: EdupageMeta) => void;
+    weeks: Week[];
+    onUpdateWeeks: (weeks: Week[]) => void;
+    onImport: (schedules: ClassSchedule[], meta?: EdupageMeta, calendarSync?: EdupageCalendarPayload) => void;
     onLoginStateChange?: (loggedIn: boolean) => void;
     edupageMeta?: EdupageMeta;
     bridgeOnline: boolean;
     edupageApiAvailable: boolean;
 }
 
-function getKWLabel(isoDate: string): string {
-    if (!isoDate) return '';
-    const [y, m, d] = isoDate.split('-').map(Number);
-    if (!y || !m || !d) return '';
-    const kw = getISOWeek(new Date(y, m - 1, d));
-    return `KW ${kw} (${kw % 2 === 1 ? 'ungerade' : 'gerade'})`;
-}
-
 export function ImportSection({
+    weeks,
+    onUpdateWeeks,
     onImport,
     onLoginStateChange,
     edupageMeta,
@@ -70,23 +72,38 @@ export function ImportSection({
     const [selectedClassIds, setSelectedClassIds] = useState<string[]>(edupageMeta?.selectedClassIds || []);
     const [classSearch, setClassSearch] = useState('');
     const [gradeFilter, setGradeFilter] = useState<string>('Alle');
-
-    const [weekADate, setWeekADate] = useState(
-        () => edupageMeta?.weekAReferenceDate || formatISODate(new Date())
-    );
-    const [useWeekB, setUseWeekB] = useState(() => Boolean(edupageMeta?.weekBReferenceDate));
-    const [weekBDate, setWeekBDate] = useState(() => {
-        if (edupageMeta?.weekBReferenceDate) return edupageMeta.weekBReferenceDate;
-        const d = new Date();
-        d.setDate(d.getDate() + 7);
-        return formatISODate(d);
-    });
     const [useShortSubjects, setUseShortSubjects] = useState(true);
 
     const [loadingLogin, setLoadingLogin] = useState(false);
     const [loadingFetch, setLoadingFetch] = useState(false);
     const [edupageError, setEdupageError] = useState<string | null>(null);
     const [edupageStatus, setEdupageStatus] = useState<string | null>(null);
+
+    const periodStartIso = useMemo(
+        () => (weeks.length > 0 ? formatISODate(getWeekDayDate(weeks[0], 'Monday')) : formatISODate(new Date())),
+        [weeks]
+    );
+    const periodEndIso = useMemo(
+        () =>
+            weeks.length > 0
+                ? formatISODate(getWeekDayDate(weeks[weeks.length - 1], 'Friday'))
+                : formatISODate(new Date()),
+        [weeks]
+    );
+
+    const handlePeriodRangeChange = (nextStartIso: string, nextEndIso: string) => {
+        if (!nextStartIso || !nextEndIso) return;
+        const [sy, sm, sd] = nextStartIso.split('-').map(Number);
+        const [ey, em, ed] = nextEndIso.split('-').map(Number);
+        if (!sy || !sm || !sd || !ey || !em || !ed) return;
+        const startD = new Date(sy, sm - 1, sd);
+        const endD = new Date(ey, em - 1, ed);
+        if (endD < startD) {
+            onUpdateWeeks(getWeeksBetween(startD, startD, weeks));
+        } else {
+            onUpdateWeeks(getWeeksBetween(startD, endD, weeks));
+        }
+    };
 
     // Load saved EduPage config / active session from local bridge
     useEffect(() => {
@@ -306,6 +323,10 @@ export function ImportSection({
             setEdupageError('Bitte mindestens eine Klasse auswählen.');
             return;
         }
+        if (weeks.length === 0) {
+            setEdupageError('Bitte zuerst einen gültigen Klausurzeitraum festlegen.');
+            return;
+        }
         setEdupageError(null);
         setEdupageStatus(null);
         setLoadingFetch(true);
@@ -315,8 +336,11 @@ export function ImportSection({
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     classIds: selectedClassIds,
-                    weekADate,
-                    weekBDate: useWeekB ? weekBDate : null,
+                    weeks: weeks.map((w) => ({
+                        id: w.id,
+                        year: w.year,
+                        weekNumber: w.weekNumber,
+                    })),
                     useShortSubjects,
                 }),
             });
@@ -329,28 +353,51 @@ export function ImportSection({
                 throw new Error('Keine Stundenpläne gefunden.');
             }
 
-            const weekAParity: 'odd' | 'even' =
-                data.weekAParity === 'even' || data.weekAParity === 'odd'
-                    ? data.weekAParity
-                    : inferWeekParityFromDate(weekADate);
+            const blockedDays = (data.blockedDays || {}) as BlockedDays;
+            const holidayLabels = (data.holidayLabels || {}) as HolidayLabels;
+            const blockedClassDays = (data.blockedClassDays || {}) as BlockedClassDays;
 
-            onImport(schedules, {
-                subdomain: subdomain.trim(),
-                username: username.trim(),
-                lastSyncAt: data.fetchedAt || new Date().toISOString(),
-                selectedClassIds,
-                weekAReferenceDate: weekADate,
-                weekBReferenceDate: useWeekB ? weekBDate : undefined,
-                weekAParity,
-            });
+            onImport(
+                schedules,
+                {
+                    subdomain: subdomain.trim(),
+                    username: username.trim(),
+                    lastSyncAt: data.fetchedAt || new Date().toISOString(),
+                    lastHolidaySyncAt: data.fetchedAt || new Date().toISOString(),
+                    selectedClassIds,
+                    useShortSubjects,
+                },
+                { blockedDays, holidayLabels, blockedClassDays }
+            );
 
+            const globalHolCount = Object.values(blockedDays).reduce(
+                (acc, dayMap) => acc + Object.values(dayMap).filter(Boolean).length,
+                0
+            );
+            const classFreeCount = Object.values(blockedClassDays).reduce(
+                (acc, wMap) =>
+                    acc +
+                    Object.values(wMap).reduce(
+                        (a2, dMap) => a2 + Object.values(dMap).filter(Boolean).length,
+                        0
+                    ),
+                0
+            );
+            const activeDays = Number(data.activeSchoolDaysFound || 0);
             const warnPart =
                 data.errors && data.errors.length > 0
                     ? ` (${data.errors.length} Hinweise: ${data.errors.join('; ')})`
                     : '';
-            setEdupageStatus(
-                `${schedules.length} Klassen-Stundenpläne importiert & A/B-Muster (${weekAParity === 'odd' ? 'Ungerade KW = A' : 'Gerade KW = A'}) übernommen.${warnPart}`
-            );
+
+            if (activeDays === 0) {
+                setEdupageStatus(
+                    `${schedules.length} Klassen abgerufen – Hinweis: Für diesen Zeitraum sind in EduPage noch keine Unterrichtsstunden hinterlegt.${warnPart}`
+                );
+            } else {
+                setEdupageStatus(
+                    `${schedules.length} Klassen über ${weeks.length} Wochen abgerufen · ${globalHolCount} schulfreie Tage/Ferien, ${classFreeCount} klassenbezogene freie Tage (z. B. Ausflug) gesperrt.${warnPart}`
+                );
+            }
         } catch (err: unknown) {
             setEdupageError(
                 err instanceof Error ? err.message : 'Fehler beim Abrufen der Stundenpläne.'
@@ -375,13 +422,6 @@ export function ImportSection({
                                 dateStyle: 'short',
                                 timeStyle: 'short',
                             })}
-                            {edupageMeta.weekAParity && (
-                                <>
-                                    {' '}
-                                    · Woche A ={' '}
-                                    {edupageMeta.weekAParity === 'odd' ? 'Ungerade KW' : 'Gerade KW'}
-                                </>
-                            )}
                         </p>
                     )}
                 </div>
@@ -672,75 +712,83 @@ export function ImportSection({
                                 )}
                             </div>
 
-                            {/* Week A / B dates & options */}
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(195px, 1fr))', gap: '0.75rem', alignItems: 'end' }}>
-                                <div>
-                                    <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                            <Calendar size={12} /> Referenzdatum Woche A
+                            {/* Klausurzeitraum wählen -> konkreter Wochen-Abruf */}
+                            <div
+                                style={{
+                                    padding: '0.75rem 0.9rem',
+                                    borderRadius: '8px',
+                                    background: 'var(--bg-surface)',
+                                    border: '1px solid var(--border-subtle)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '0.65rem',
+                                }}
+                            >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                                    <span style={{ fontSize: '0.8rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                        <Calendar size={14} color="var(--accent-primary)" />
+                                        Klausurzeitraum für den Abruf
+                                    </span>
+                                    {weeks.length > 0 && (
+                                        <span style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--accent-primary)' }}>
+                                            KW {weeks[0].weekNumber}–{weeks[weeks.length - 1].weekNumber} ({weeks.length}{' '}
+                                            {weeks.length === 1 ? 'Woche' : 'Wochen'} ·{' '}
+                                            {formatShortDate(getWeekDayDate(weeks[0], 'Monday'))}–
+                                            {formatShortDate(getWeekDayDate(weeks[weeks.length - 1], 'Friday'))})
                                         </span>
-                                        <span style={{ color: 'var(--accent-primary)', fontWeight: 700 }}>
-                                            {getKWLabel(weekADate)}
-                                        </span>
-                                    </label>
-                                    <input
-                                        type="date"
-                                        className="ui-input"
-                                        value={weekADate}
-                                        onChange={(e) => setWeekADate(e.target.value)}
-                                    />
+                                    )}
                                 </div>
 
-                                <div>
-                                    <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px', cursor: 'pointer' }}>
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                                            <input
-                                                type="checkbox"
-                                                checked={useWeekB}
-                                                onChange={(e) => setUseWeekB(e.target.checked)}
-                                            />
-                                            Auch Woche B abrufen
-                                        </span>
-                                        {useWeekB && (
-                                            <span style={{ color: 'var(--accent-purple)', fontWeight: 700 }}>
-                                                {getKWLabel(weekBDate)}
-                                            </span>
-                                        )}
-                                    </label>
-                                    <input
-                                        type="date"
-                                        className="ui-input"
-                                        value={weekBDate}
-                                        disabled={!useWeekB}
-                                        onChange={(e) => setWeekBDate(e.target.value)}
-                                        style={{ opacity: useWeekB ? 1 : 0.45 }}
-                                    />
-                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(185px, 1fr))', gap: '0.75rem', alignItems: 'end' }}>
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                                            Von (Startdatum)
+                                        </label>
+                                        <input
+                                            type="date"
+                                            className="ui-input"
+                                            value={periodStartIso}
+                                            onChange={(e) => handlePeriodRangeChange(e.target.value, periodEndIso)}
+                                        />
+                                    </div>
 
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.84rem', color: 'var(--text-secondary)', cursor: 'pointer', paddingBottom: '7px' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={useShortSubjects}
-                                        onChange={(e) => setUseShortSubjects(e.target.checked)}
-                                    />
-                                    Fach-Kürzel verwenden (z. B. M, D)
-                                </label>
+                                    <div>
+                                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                                            Bis (Enddatum)
+                                        </label>
+                                        <input
+                                            type="date"
+                                            className="ui-input"
+                                            value={periodEndIso}
+                                            onChange={(e) => handlePeriodRangeChange(periodStartIso, e.target.value)}
+                                        />
+                                    </div>
+
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.84rem', color: 'var(--text-secondary)', cursor: 'pointer', paddingBottom: '7px' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={useShortSubjects}
+                                            onChange={(e) => setUseShortSubjects(e.target.checked)}
+                                        />
+                                        Fach-Kürzel verwenden (z. B. M, D)
+                                    </label>
+                                </div>
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem' }}>
                                 <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                                    Ferien, schulfreie Tage & A/B-Wochen werden für den Klausurzeitraum automatisch mit abgerufen.
+                                    Jede Woche wird exakt abgerufen: welche Fächer wann stattfinden und an welchen Tagen eine Klasse keinen Unterricht hat (Ferien, Feiertage, Ausflüge).
                                 </span>
                                 <button
                                     type="button"
                                     onClick={handleFetchTimetables}
-                                    disabled={loadingFetch || selectedClassIds.length === 0}
+                                    disabled={loadingFetch || selectedClassIds.length === 0 || weeks.length === 0}
                                     className="ui-btn ui-btn-primary"
                                 >
                                     <RefreshCw size={15} />
                                     {loadingFetch
-                                        ? 'Rufe Stundenpläne ab...'
-                                        : `Stundenpläne abrufen (${selectedClassIds.length})`}
+                                        ? `Rufe ${weeks.length} Wochen ab...`
+                                        : `Unterricht für Zeitraum abrufen (${selectedClassIds.length})`}
                                 </button>
                             </div>
                         </div>

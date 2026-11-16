@@ -262,6 +262,61 @@ def _build_subject_lookup(edupage: Any, use_short: bool) -> dict[str, str]:
     return lookup
 
 
+def _build_teacher_lookup(edupage: Any) -> dict[str, tuple[str, str]]:
+    """Returns mapping teacher person_id -> (label, full_name)."""
+    lookup: dict[str, tuple[str, str]] = {}
+    try:
+        teachers = edupage.get_teachers() or []
+        for t in teachers:
+            pid = getattr(t, "person_id", getattr(t, "id", None))
+            if pid is None:
+                continue
+            short_t = (getattr(t, "short", None) or "").strip()
+            name_t = (getattr(t, "name", None) or "").strip()
+            label = short_t or name_t
+            if label:
+                lookup[str(pid)] = (label, name_t or label)
+    except Exception:
+        pass
+    return lookup
+
+
+def _parse_weeks_payload(
+    weeks_payload: list[dict[str, Any]],
+) -> list[tuple[str, datetime.date, datetime.date]]:
+    parsed_weeks: list[tuple[str, datetime.date, datetime.date]] = []
+    for w in weeks_payload:
+        if not isinstance(w, dict):
+            continue
+        wid = str(w.get("id") or "")
+        s_str = str(w.get("startDate") or "")
+        e_str = str(w.get("endDate") or "")
+        if s_str and e_str and wid:
+            try:
+                parsed_weeks.append(
+                    (wid, datetime.date.fromisoformat(s_str[:10]), datetime.date.fromisoformat(e_str[:10]))
+                )
+                continue
+            except Exception:
+                pass
+        year_val = w.get("year")
+        wn_val = w.get("weekNumber")
+        if wid and year_val is not None and wn_val is not None:
+            try:
+                y_int = int(year_val)
+                wn_int = int(wn_val)
+                parsed_weeks.append(
+                    (
+                        wid,
+                        datetime.date.fromisocalendar(y_int, wn_int, 1),
+                        datetime.date.fromisocalendar(y_int, wn_int, 5),
+                    )
+                )
+            except Exception:
+                continue
+    return parsed_weeks
+
+
 def _fetch_range_ttitems(
     edupage: Any,
     class_id: int | str,
@@ -582,6 +637,319 @@ def _sync_calendar_from_edupage(
         "weekTypes": week_types,
         "detectedHolidayCount": detected_holiday_count,
         "activeSchoolDaysFound": active_school_days,
+    }
+
+
+def _fetch_period_schedules(
+    edupage: Any,
+    selected_objs: list[Any],
+    weeks_payload: list[dict[str, Any]],
+    use_short: bool,
+) -> dict[str, Any]:
+    """
+    Fetches concrete week-by-week schedules for every selected class across the
+    selected Klausurzeitraum (`weeks_payload`), checking on every single day
+    whether each class actually has lessons or is free (holidays, trips, etc.).
+    """
+    parsed_weeks = _parse_weeks_payload(weeks_payload)
+    if not parsed_weeks or not selected_objs:
+        return {
+            "schedules": [],
+            "errors": [],
+            "blockedDays": {},
+            "holidayLabels": {},
+            "blockedClassDays": {},
+            "activeSchoolDaysFound": 0,
+        }
+
+    min_date = min(s for _, s, _ in parsed_weeks)
+    max_date = max(e for _, _, e in parsed_weeks)
+
+    subject_lookup = _build_subject_lookup(edupage, use_short)
+    teacher_lookup = _build_teacher_lookup(edupage)
+    timeline_labels = _collect_timeline_holidays(edupage, min_date, max_date)
+
+    # Global holiday keyword matcher (holidays/vacation/school-wide closures)
+    holiday_kw_re = re.compile(
+        r"ferien|feiertag|frei|holiday|bewegl|ausfall|unterrichtsfrei|pädagog|studien|konferenz|brückentag",
+        re.I,
+    )
+    # Any event text matcher (also catches class-specific trips like Ausflug / Exkursion / Praktikum)
+    any_event_re = re.compile(
+        r"ferien|feiertag|frei|holiday|bewegl|ausfall|unterrichtsfrei|pädagog|studien|konferenz|brückentag|ausflug|wandertag|exkursion|praktikum|klassenfahrt|projekt",
+        re.I,
+    )
+
+    per_class_raw: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    total_active_class_days = 0
+
+    for cls_obj in selected_objs:
+        cname = str(getattr(cls_obj, "name", getattr(cls_obj, "short", "Unbekannt")))
+        cid = getattr(cls_obj, "class_id", getattr(cls_obj, "id", None))
+        grade = getattr(cls_obj, "grade", None)
+
+        subjects_by_date: dict[str, list[str]] = {}
+        teachers_by_date: dict[str, dict[str, list[str]]] = {}
+        event_by_date: dict[str, str] = {}
+        cancelled_by_date: dict[str, int] = {}
+        teacher_names: dict[str, str] = {}
+
+        try:
+            used_range = False
+            if cid is not None:
+                items = _fetch_range_ttitems(edupage, cid, min_date, max_date)
+                if items is not None:
+                    has_date_field = any(
+                        isinstance(it.get("date"), str) and len(it.get("date", "")) >= 10
+                        for it in items
+                    )
+                    if len(items) == 0 or has_date_field:
+                        used_range = True
+                        # Group items by date, then sort each day's lessons by (period, start_time)
+                        by_date_items: dict[str, list[dict[str, Any]]] = {}
+                        for it in items:
+                            d_raw = it.get("date")
+                            if not isinstance(d_raw, str) or len(d_raw) < 10:
+                                continue
+                            by_date_items.setdefault(d_raw[:10], []).append(it)
+
+                        def _item_sort_key(it: dict[str, Any]) -> tuple[int, str]:
+                            p_raw = str(it.get("uniperiod") or "")
+                            p_num = int(p_raw) if p_raw.isdigit() else 999
+                            st = str(it.get("starttime") or "")
+                            return (p_num, st)
+
+                        for d_iso, day_items in by_date_items.items():
+                            day_items.sort(key=_item_sort_key)
+                            for it in day_items:
+                                if "header" in it and (
+                                    not it.get("header")
+                                    or (
+                                        isinstance(it.get("header"), list)
+                                        and isinstance(it["header"][0], dict)
+                                        and it["header"][0].get("cmd") == "addlesson_t"
+                                    )
+                                ):
+                                    continue
+                                raw_type = it.get("type")
+                                l_type = str(raw_type) if raw_type is not None else ""
+                                is_removed = bool(it.get("removed"))
+                                is_event = l_type in ("event", "out") or bool(it.get("main"))
+                                is_cancelled = is_removed or raw_type in ("absent", "")
+
+                                if is_event:
+                                    flags = it.get("flags") if isinstance(it.get("flags"), dict) else {}
+                                    ev_name = (
+                                        (flags.get("event") or {}).get("name")
+                                        if isinstance(flags.get("event"), dict)
+                                        else None
+                                    ) or (
+                                        (flags.get("dp0") or {}).get("note_wd")
+                                        if isinstance(flags.get("dp0"), dict)
+                                        else None
+                                    ) or it.get("name")
+                                    if isinstance(ev_name, str) and ev_name.strip():
+                                        if any_event_re.search(ev_name) or not it.get("subjectid"):
+                                            event_by_date.setdefault(d_iso, ev_name.strip()[:48])
+                                    continue
+
+                                if is_cancelled:
+                                    cancelled_by_date[d_iso] = cancelled_by_date.get(d_iso, 0) + 1
+                                    continue
+
+                                subj_id = it.get("subjectid")
+                                if not subj_id:
+                                    continue
+                                subj_label = subject_lookup.get(str(subj_id))
+                                if not subj_label:
+                                    continue
+
+                                subjects_by_date.setdefault(d_iso, []).append(subj_label)
+                                t_ids = it.get("teacherids") or []
+                                if isinstance(t_ids, list) and t_ids:
+                                    t_map = teachers_by_date.setdefault(d_iso, {}).setdefault(subj_label, [])
+                                    for tid in t_ids:
+                                        t_info = teacher_lookup.get(str(tid))
+                                        if not t_info:
+                                            continue
+                                        t_lbl, t_full = t_info
+                                        if t_lbl not in t_map:
+                                            t_map.append(t_lbl)
+                                        if t_full:
+                                            teacher_names[t_lbl] = t_full
+
+            # Fallback per day if range endpoint did not include per-date fields
+            if not used_range:
+                for _, w_start, _ in parsed_weeks:
+                    for idx in range(5):
+                        d_obj = w_start + datetime.timedelta(days=idx)
+                        d_iso = d_obj.isoformat()
+                        lessons = _get_lessons_for_class_day(edupage, cls_obj, d_obj)
+
+                        def _lesson_sort_key(l: Any) -> tuple[int, str]:
+                            p = getattr(l, "period", None)
+                            try:
+                                p_num = int(p) if p is not None else 999
+                            except Exception:
+                                p_num = 999
+                            return (p_num, str(getattr(l, "start_time", "") or ""))
+
+                        lessons.sort(key=_lesson_sort_key)
+                        for lesson in lessons:
+                            if getattr(lesson, "is_event", False):
+                                cur_txt = str(getattr(lesson, "curriculum", "") or "").strip()
+                                if cur_txt:
+                                    event_by_date.setdefault(d_iso, cur_txt[:48])
+                                continue
+                            if getattr(lesson, "is_cancelled", False):
+                                cancelled_by_date[d_iso] = cancelled_by_date.get(d_iso, 0) + 1
+                                continue
+                            subj_label = _extract_subject_label(lesson, use_short)
+                            if not subj_label:
+                                continue
+                            subjects_by_date.setdefault(d_iso, []).append(subj_label)
+                            t_list = _extract_teachers(lesson, teacher_names)
+                            if t_list:
+                                existing_t = teachers_by_date.setdefault(d_iso, {}).setdefault(subj_label, [])
+                                for t_lbl in t_list:
+                                    if t_lbl not in existing_t:
+                                        existing_t.append(t_lbl)
+
+            total_active_class_days += sum(1 for s_list in subjects_by_date.values() if len(s_list) > 0)
+            per_class_raw[cname] = {
+                "cname": cname,
+                "grade": grade,
+                "subjects_by_date": subjects_by_date,
+                "teachers_by_date": teachers_by_date,
+                "event_by_date": event_by_date,
+                "cancelled_by_date": cancelled_by_date,
+                "teacher_names": teacher_names,
+            }
+        except Exception as exc:
+            errors.append(f"{cname}: {exc}")
+
+    # Build concrete weeklySchedules + detect global holidays vs class-specific free days
+    blocked_days: dict[str, dict[str, bool]] = {}
+    holiday_labels: dict[str, dict[str, str]] = {}
+    blocked_class_days: dict[str, dict[str, dict[str, bool]]] = {}
+
+    class_names_fetched = list(per_class_raw.keys())
+
+    # Pre-initialize per-class output containers
+    schedules_out: list[dict[str, Any]] = []
+    class_week_maps: dict[str, dict[str, dict[str, Any]]] = {c: {} for c in class_names_fetched}
+
+    for wid, w_start, _ in parsed_weeks:
+        for idx, day_name in enumerate(DAY_NAMES):
+            d_iso = (w_start + datetime.timedelta(days=idx)).isoformat()
+            tl_label = timeline_labels.get(d_iso)
+
+            # Check per-class lesson counts and explicit event reasons for this date
+            classes_with_lessons = 0
+            explicit_holiday_label = tl_label
+            for cname in class_names_fetched:
+                raw = per_class_raw[cname]
+                if len(raw["subjects_by_date"].get(d_iso, [])) > 0:
+                    classes_with_lessons += 1
+                elif not explicit_holiday_label:
+                    ev = raw["event_by_date"].get(d_iso)
+                    if ev and holiday_kw_re.search(ev):
+                        explicit_holiday_label = ev
+
+            all_classes_free = (
+                len(class_names_fetched) > 0
+                and total_active_class_days >= 1
+                and classes_with_lessons == 0
+            )
+            is_global_holiday = bool(explicit_holiday_label) or all_classes_free
+
+            if is_global_holiday:
+                global_label = explicit_holiday_label or "Schulfrei / Ferien"
+                blocked_days.setdefault(wid, {})[day_name] = True
+                holiday_labels.setdefault(wid, {})[day_name] = global_label
+
+            for cname in class_names_fetched:
+                raw = per_class_raw[cname]
+                w_data = class_week_maps[cname].setdefault(
+                    wid,
+                    {
+                        "subjects": {d: [] for d in DAY_NAMES},
+                        "subjectTeachers": {},
+                        "freeDays": {},
+                    },
+                )
+                day_subjs = raw["subjects_by_date"].get(d_iso, [])
+                day_teach = raw["teachers_by_date"].get(d_iso, {})
+
+                w_data["subjects"][day_name] = list(day_subjs)
+                if day_teach:
+                    w_data["subjectTeachers"][day_name] = {k: list(v) for k, v in day_teach.items()}
+
+                if len(day_subjs) == 0 and (total_active_class_days >= 1 or bool(tl_label) or bool(raw["event_by_date"].get(d_iso))):
+                    reason = (
+                        tl_label
+                        or raw["event_by_date"].get(d_iso)
+                        or explicit_holiday_label
+                        or ("Unterricht entfällt" if raw["cancelled_by_date"].get(d_iso, 0) > 0 else "Kein Unterricht")
+                    )
+                    w_data["freeDays"][day_name] = reason
+                    if not is_global_holiday:
+                        blocked_class_days.setdefault(cname, {}).setdefault(wid, {})[day_name] = True
+
+    for cname in class_names_fetched:
+        raw = per_class_raw[cname]
+        weekly_schedules = class_week_maps[cname]
+
+        # Build representative fallback subjects & teachers across weeks (for SubjectSelection / fallback)
+        # Prefer the first week that actually has lessons for each weekday so blocked holidays don't leave Monday empty everywhere
+        fallback_subjects: dict[str, list[str]] = {d: [] for d in DAY_NAMES}
+        fallback_teachers: dict[str, dict[str, list[str]]] = {}
+        for day_name in DAY_NAMES:
+            seen_day_subjs: list[str] = []
+            for wid, _, _ in parsed_weeks:
+                w_subjs = weekly_schedules[wid]["subjects"].get(day_name, [])
+                for s in w_subjs:
+                    if s not in seen_day_subjs:
+                        seen_day_subjs.append(s)
+                w_teach = weekly_schedules[wid]["subjectTeachers"].get(day_name, {})
+                for s, t_list in w_teach.items():
+                    dest = fallback_teachers.setdefault(day_name, {}).setdefault(s, [])
+                    for t in t_list:
+                        if t not in dest:
+                            dest.append(t)
+            fallback_subjects[day_name] = seen_day_subjs
+
+        # Clean empty dicts inside weeklySchedules
+        cleaned_weekly: dict[str, dict[str, Any]] = {}
+        for wid, w_data in weekly_schedules.items():
+            w_entry: dict[str, Any] = {"subjects": w_data["subjects"]}
+            if w_data["subjectTeachers"]:
+                w_entry["subjectTeachers"] = w_data["subjectTeachers"]
+            if w_data["freeDays"]:
+                w_entry["freeDays"] = w_data["freeDays"]
+            cleaned_weekly[wid] = w_entry
+
+        entry: dict[str, Any] = {
+            "className": cname,
+            "gradeLevel": _infer_grade_level(cname, raw["grade"]),
+            "subjects": fallback_subjects,
+            "weeklySchedules": cleaned_weekly,
+        }
+        if fallback_teachers:
+            entry["subjectTeachers"] = fallback_teachers
+        if raw["teacher_names"]:
+            entry["teacherNames"] = raw["teacher_names"]
+
+        schedules_out.append(entry)
+
+    return {
+        "schedules": schedules_out,
+        "errors": errors,
+        "blockedDays": blocked_days,
+        "holidayLabels": holiday_labels,
+        "blockedClassDays": blocked_class_days,
+        "activeSchoolDaysFound": total_active_class_days,
     }
 
 
@@ -934,16 +1302,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         class_ids = set(str(x) for x in (body.get("classIds") or []))
-        week_a_date_str = str(body.get("weekADate") or datetime.date.today().isoformat())
-        week_b_date_str = body.get("weekBDate")
         use_short = bool(body.get("useShortSubjects", True))
+        weeks_payload = body.get("weeks")
 
-        try:
-            monday_a = _monday_of_date(week_a_date_str)
-            monday_b = _monday_of_date(str(week_b_date_str)) if week_b_date_str else None
-        except Exception as exc:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"Ungültiges Datum: {exc}"})
-            return
+        if not isinstance(weeks_payload, list) or not weeks_payload:
+            # Fallback if called without explicit weeks array
+            week_a_date_str = str(body.get("weekADate") or datetime.date.today().isoformat())
+            try:
+                monday_a = _monday_of_date(week_a_date_str)
+            except Exception as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"Ungültiges Datum: {exc}"})
+                return
+            iso_y, iso_w, _ = monday_a.isocalendar()
+            weeks_payload = [
+                {
+                    "id": f"{iso_y}-KW{iso_w:02d}",
+                    "year": iso_y,
+                    "weekNumber": iso_w,
+                    "startDate": monday_a.isoformat(),
+                    "endDate": (monday_a + datetime.timedelta(days=4)).isoformat(),
+                }
+            ]
 
         if not classes_cache:
             classes_cache = list(edupage.get_classes() or [])
@@ -961,48 +1340,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Keine passenden Klassen ausgewählt."})
             return
 
-        schedules: list[dict[str, Any]] = []
-        errors: list[str] = []
-
-        for cls_obj in selected_objs:
-            cname = str(getattr(cls_obj, "name", getattr(cls_obj, "short", "Unbekannt")))
-            grade = getattr(cls_obj, "grade", None)
-            try:
-                subj_a, teachers_a, names_a = _fetch_week_schedule(edupage, cls_obj, monday_a, use_short)
-                entry: dict[str, Any] = {
-                    "className": cname,
-                    "gradeLevel": _infer_grade_level(cname, grade),
-                    "subjects": subj_a,
-                }
-                if teachers_a:
-                    entry["subjectTeachers"] = teachers_a
-                merged_names = dict(names_a)
-
-                if monday_b is not None:
-                    subj_b, teachers_b, names_b = _fetch_week_schedule(edupage, cls_obj, monday_b, use_short)
-                    merged_names.update(names_b)
-                    if subj_b != subj_a:
-                        entry["subjectsB"] = subj_b
-                        if teachers_b:
-                            entry["subjectTeachersB"] = teachers_b
-                if merged_names:
-                    entry["teacherNames"] = merged_names
-
-                schedules.append(entry)
-            except Exception as exc:
-                errors.append(f"{cname}: {exc}")
-
-        week_a_parity = "odd" if (monday_a.isocalendar().week % 2 == 1) else "even"
-
-        self._send_json(
-            HTTPStatus.OK,
-            {
-                "schedules": schedules,
-                "errors": errors,
-                "weekAParity": week_a_parity,
-                "fetchedAt": datetime.datetime.now().isoformat(),
-            },
-        )
+        result = _fetch_period_schedules(edupage, selected_objs, weeks_payload, use_short)
+        result["fetchedAt"] = datetime.datetime.now().isoformat()
+        self._send_json(HTTPStatus.OK, result)
 
     def _handle_sync_calendar(self, body: dict[str, Any]) -> None:
         if not self._ensure_edupage_available():

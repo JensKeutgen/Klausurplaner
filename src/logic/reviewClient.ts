@@ -60,10 +60,20 @@ export function buildReviewSnapshot(state: AppState): ReviewPlanSnapshot {
   };
 }
 
+function getClassTeacherMaps(cls: ClassSchedule) {
+  const maps = [cls.subjectTeachers, cls.subjectTeachersB].filter(Boolean);
+  if (cls.weeklySchedules) {
+    for (const wData of Object.values(cls.weeklySchedules)) {
+      if (wData.subjectTeachers) maps.push(wData.subjectTeachers);
+    }
+  }
+  return maps;
+}
+
 export function extractTeacherCodes(classes: ClassSchedule[]): string[] {
   const set = new Set<string>();
   for (const cls of classes) {
-    for (const map of [cls.subjectTeachers, cls.subjectTeachersB]) {
+    for (const map of getClassTeacherMaps(cls)) {
       if (!map) continue;
       for (const day of DAYS_OF_WEEK) {
         const dayMap = map[day];
@@ -93,14 +103,14 @@ export function getExamTeachersNormalized(
 
   if (exam.assignedWeekId && exam.assignedDay) {
     const week = weeks.find((w) => w.id === exam.assignedWeekId);
-    const direct = getTeachersForSubjectOnDay(cls, exam.subject, exam.assignedDay, week?.weekType || 'A');
+    const direct = getTeachersForSubjectOnDay(cls, exam.subject, exam.assignedDay, week?.id);
     if (direct.length > 0) {
       return direct.map((t) => t.trim().toUpperCase()).filter(Boolean);
     }
   }
 
   const all = new Set<string>();
-  for (const map of [cls.subjectTeachers, cls.subjectTeachersB]) {
+  for (const map of getClassTeacherMaps(cls)) {
     if (!map) continue;
     for (const day of DAYS_OF_WEEK) {
       const teachers = map[day]?.[exam.subject];
@@ -120,7 +130,7 @@ export function getTeacherClasses(classes: ClassSchedule[], teacherCode: string)
 
   for (const cls of classes) {
     let matches = false;
-    for (const map of [cls.subjectTeachers, cls.subjectTeachersB]) {
+    for (const map of getClassTeacherMaps(cls)) {
       if (!map) continue;
       for (const day of DAYS_OF_WEEK) {
         const dayMap = map[day];

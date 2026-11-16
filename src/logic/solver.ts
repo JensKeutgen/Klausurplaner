@@ -97,17 +97,43 @@ export function getEffectiveGradeLevel(schedule: ClassSchedule | undefined, clas
     return inferGradeLevel(className);
 }
 
-// Helper: Check if a subject is taught on a specific day
+/** Returns concrete WeekScheduleData for a given weekId if fetched, or null to use default template. */
+export function getWeekScheduleData(schedule: ClassSchedule, weekId?: string) {
+    if (weekId && schedule.weeklySchedules?.[weekId]) {
+        return schedule.weeklySchedules[weekId];
+    }
+    return null;
+}
+
+/** Collects all unique taught subjects across default plan + all weeklySchedules (and legacy subjectsB). */
+export function getAllSubjectsForClass(schedule: ClassSchedule): string[] {
+    const set = new Set<string>(Object.values(schedule.subjects || {}).flat());
+    if (schedule.weeklySchedules) {
+        for (const wData of Object.values(schedule.weeklySchedules)) {
+            for (const arr of Object.values(wData.subjects || {})) {
+                for (const s of arr) set.add(s);
+            }
+        }
+    }
+    if (schedule.subjectsB) {
+        for (const arr of Object.values(schedule.subjectsB)) {
+            for (const s of arr) set.add(s);
+        }
+    }
+    return Array.from(set);
+}
+
+// Helper: Check if a subject is taught on a specific day in a given week
 export function isSubjectTaughtOnDay(
     schedule: ClassSchedule,
     subject: string,
     day: DayOfWeek,
-    weekType: 'A' | 'B' = 'A'
+    weekId?: string
 ): boolean {
-    const subjectsOnDay =
-        weekType === 'B' && schedule.subjectsB
-            ? schedule.subjectsB[day] || []
-            : schedule.subjects[day] || [];
+    const wData = getWeekScheduleData(schedule, weekId);
+    const subjectsOnDay = wData
+        ? wData.subjects[day] || []
+        : schedule.subjects[day] || [];
 
     return subjectsOnDay.includes(subject);
 }
@@ -117,31 +143,30 @@ export function getSubjectPeriodCount(
     schedule: ClassSchedule,
     subject: string,
     day: DayOfWeek,
-    weekType: 'A' | 'B' = 'A'
+    weekId?: string
 ): number {
-    const subjectsOnDay =
-        weekType === 'B' && schedule.subjectsB
-            ? schedule.subjectsB[day] || []
-            : schedule.subjects[day] || [];
+    const wData = getWeekScheduleData(schedule, weekId);
+    const subjectsOnDay = wData
+        ? wData.subjects[day] || []
+        : schedule.subjects[day] || [];
 
     return subjectsOnDay.filter((s) => s === subject).length;
 }
 
-// Extract teacher labels for a subject on a day
+// Extract teacher labels for a subject on a day in a given week
 export function getTeachersForSubjectOnDay(
     schedule: ClassSchedule | undefined,
     subject: string,
     day: DayOfWeek,
-    weekType: 'A' | 'B' = 'A'
+    weekId?: string
 ): string[] {
     if (!schedule) return [];
-    const map = weekType === 'B' && schedule.subjectTeachersB
-        ? schedule.subjectTeachersB
-        : schedule.subjectTeachers;
+    const wData = getWeekScheduleData(schedule, weekId);
+    const map = wData?.subjectTeachers ?? schedule.subjectTeachers;
     return map?.[day]?.[subject] || [];
 }
 
-// Extract all unique teachers teaching this subject across Week A & Week B in this class
+// Extract all unique teachers teaching this subject across all fetched weeks & default schedule
 export function getAllTeachersForSubject(
     schedule: ClassSchedule | undefined,
     subject: string
@@ -151,6 +176,13 @@ export function getAllTeachersForSubject(
     for (const day of DAYS_OF_WEEK) {
         for (const t of schedule.subjectTeachers?.[day]?.[subject] || []) {
             result.add(t);
+        }
+        if (schedule.weeklySchedules) {
+            for (const wData of Object.values(schedule.weeklySchedules)) {
+                for (const t of wData.subjectTeachers?.[day]?.[subject] || []) {
+                    result.add(t);
+                }
+            }
         }
         for (const t of schedule.subjectTeachersB?.[day]?.[subject] || []) {
             result.add(t);
@@ -164,10 +196,10 @@ export function getEffectiveExamTeachers(
     schedule: ClassSchedule | undefined,
     subject: string,
     day: DayOfWeek,
-    weekType: 'A' | 'B' = 'A'
+    weekId?: string
 ): string[] {
     if (!schedule) return [];
-    const dayTeachers = getTeachersForSubjectOnDay(schedule, subject, day, weekType);
+    const dayTeachers = getTeachersForSubjectOnDay(schedule, subject, day, weekId);
     const chosen = schedule.examTeacherBySubject?.[subject];
     if (chosen) {
         if (dayTeachers.length > 0) {
@@ -182,9 +214,9 @@ export function isSubjectTaughtByExamTeacherOnDay(
     schedule: ClassSchedule,
     subject: string,
     day: DayOfWeek,
-    weekType: 'A' | 'B' = 'A'
+    weekId?: string
 ): boolean {
-    if (!isSubjectTaughtOnDay(schedule, subject, day, weekType)) {
+    if (!isSubjectTaughtOnDay(schedule, subject, day, weekId)) {
         return false;
     }
     const chosen = schedule.examTeacherBySubject?.[subject];
@@ -193,7 +225,7 @@ export function isSubjectTaughtByExamTeacherOnDay(
     const allKnownTeachers = getAllTeachersForSubject(schedule, subject);
     if (allKnownTeachers.length === 0) return true;
 
-    const dayTeachers = getTeachersForSubjectOnDay(schedule, subject, day, weekType);
+    const dayTeachers = getTeachersForSubjectOnDay(schedule, subject, day, weekId);
     return dayTeachers.includes(chosen);
 }
 
@@ -233,24 +265,32 @@ export function validateMove(
     if (blockedDays[targetWeekId]?.[targetDay]) {
         return { valid: false, reason: 'Tag ist global blockiert (z. B. Ferien/Feiertag).' };
     }
+    const freeReason = classSchedule.weeklySchedules?.[targetWeekId]?.freeDays?.[targetDay];
     if (blockedClassDays[exam.className]?.[targetWeekId]?.[targetDay]) {
-        return { valid: false, reason: `Tag ist für ${exam.className} blockiert.` };
-    }
-
-    // 2. Check if subject (and chosen exam teacher) is taught on that day
-    if (!isSubjectTaughtOnDay(classSchedule, exam.subject, targetDay, targetWeek.weekType)) {
         return {
             valid: false,
-            reason: `${exam.subject} wird am ${GERMAN_DAY_FULL[targetDay]} in Woche ${targetWeek.weekType} nicht unterrichtet.`,
+            reason: freeReason
+                ? `${exam.className} hat am ${GERMAN_DAY_FULL[targetDay]} keinen Unterricht (${freeReason}).`
+                : `Tag ist für ${exam.className} blockiert.`,
         };
     }
 
-    if (!isSubjectTaughtByExamTeacherOnDay(classSchedule, exam.subject, targetDay, targetWeek.weekType)) {
-        const chosen = classSchedule.examTeacherBySubject?.[exam.subject];
-        const dayTeachers = getTeachersForSubjectOnDay(classSchedule, exam.subject, targetDay, targetWeek.weekType);
+    // 2. Check if subject (and chosen exam teacher) is taught on that day in this week
+    if (!isSubjectTaughtOnDay(classSchedule, exam.subject, targetDay, targetWeekId)) {
         return {
             valid: false,
-            reason: `${exam.subject} wird am ${GERMAN_DAY_FULL[targetDay]} (Woche ${targetWeek.weekType}) nicht bei ${chosen} unterrichtet${dayTeachers.length > 0 ? ` (nur: ${dayTeachers.join(', ')})` : ''}.`,
+            reason: freeReason
+                ? `${exam.className} hat am ${GERMAN_DAY_FULL[targetDay]} (KW ${targetWeek.weekNumber}) keinen Unterricht (${freeReason}).`
+                : `${exam.subject} wird am ${GERMAN_DAY_FULL[targetDay]} (KW ${targetWeek.weekNumber}) nicht unterrichtet.`,
+        };
+    }
+
+    if (!isSubjectTaughtByExamTeacherOnDay(classSchedule, exam.subject, targetDay, targetWeekId)) {
+        const chosen = classSchedule.examTeacherBySubject?.[exam.subject];
+        const dayTeachers = getTeachersForSubjectOnDay(classSchedule, exam.subject, targetDay, targetWeekId);
+        return {
+            valid: false,
+            reason: `${exam.subject} wird am ${GERMAN_DAY_FULL[targetDay]} (KW ${targetWeek.weekNumber}) nicht bei ${chosen} unterrichtet${dayTeachers.length > 0 ? ` (nur: ${dayTeachers.join(', ')})` : ''}.`,
         };
     }
 
@@ -283,7 +323,7 @@ export function validateMove(
             classSchedule,
             exam.subject,
             targetDay,
-            targetWeek.weekType
+            targetWeekId
         );
         if (myTeachers.length > 0) {
             const sameDayOtherExams = allExams.filter(
@@ -299,7 +339,7 @@ export function validateMove(
                     otherCls,
                     other.subject,
                     targetDay,
-                    targetWeek.weekType
+                    targetWeekId
                 );
                 const overlap = myTeachers.filter((t) => otherTeachers.includes(t));
                 if (overlap.length > 0) {
@@ -339,7 +379,6 @@ interface CandidateSlot {
     weekId: string;
     dayIndex: number;
     day: DayOfWeek;
-    weekType: 'A' | 'B';
     periodCount: number;
     teachers: string[];
 }
@@ -418,7 +457,7 @@ export function evaluateSchedule(
             const weekIdx = weekIdxMap.get(exam.assignedWeekId);
             if (weekIdx !== undefined) {
                 const week = weeks[weekIdx];
-                const pCount = getSubjectPeriodCount(cls, exam.subject, exam.assignedDay, week.weekType);
+                const pCount = getSubjectPeriodCount(cls, exam.subject, exam.assignedDay, week.id);
                 if (pCount >= 2) {
                     score += 15;
                 }
@@ -525,13 +564,11 @@ export function evaluateSchedule(
         if (slotExams.length < 2) continue;
         const [weekId, dayStr] = slotKey.split('::');
         const day = dayStr as DayOfWeek;
-        const wIdx = weekIdxMap.get(weekId);
-        const weekType = wIdx !== undefined ? weeks[wIdx].weekType : 'A';
 
         const teacherUsage = new Map<string, number>();
         for (const e of slotExams) {
             const cls = classMap.get(e.className);
-            const teachers = getEffectiveExamTeachers(cls, e.subject, day, weekType);
+            const teachers = getEffectiveExamTeachers(cls, e.subject, day, weekId);
             for (const t of new Set(teachers)) {
                 teacherUsage.set(t, (teacherUsage.get(t) || 0) + 1);
             }
@@ -578,17 +615,16 @@ function buildCandidatesForExam(
         DAYS_OF_WEEK.forEach((day, dayIndex) => {
             if (blockedDays[week.id]?.[day]) return;
             if (blockedClassDays[exam.className]?.[week.id]?.[day]) return;
-            if (!isSubjectTaughtByExamTeacherOnDay(cls, exam.subject, day, week.weekType)) return;
+            if (!isSubjectTaughtByExamTeacherOnDay(cls, exam.subject, day, week.id)) return;
 
-            const periodCount = getSubjectPeriodCount(cls, exam.subject, day, week.weekType);
-            const teachers = getEffectiveExamTeachers(cls, exam.subject, day, week.weekType);
+            const periodCount = getSubjectPeriodCount(cls, exam.subject, day, week.id);
+            const teachers = getEffectiveExamTeachers(cls, exam.subject, day, week.id);
 
             candidates.push({
                 weekIndex,
                 weekId: week.id,
                 dayIndex,
                 day,
-                weekType: week.weekType,
                 periodCount,
                 teachers,
             });
@@ -685,7 +721,7 @@ function scoreCandidateSlot(
                 continue;
             }
             const otherCls = classMap.get(other.className);
-            const otherTeachers = getEffectiveExamTeachers(otherCls, other.subject, slot.day, slot.weekType);
+            const otherTeachers = getEffectiveExamTeachers(otherCls, other.subject, slot.day, slot.weekId);
             if (slot.teachers.some((t) => otherTeachers.includes(t))) {
                 s -= 260;
             }
@@ -1003,10 +1039,7 @@ export function distributeExams(
 
     for (const cls of classes) {
         const allowedSubjects = selectedSubjects[cls.className] || [];
-        const subjectsA = Object.values(cls.subjects).flat();
-        const subjectsB = cls.subjectsB ? Object.values(cls.subjectsB).flat() : [];
-
-        const uniqueSubjects = Array.from(new Set([...subjectsA, ...subjectsB])).filter((s) =>
+        const uniqueSubjects = getAllSubjectsForClass(cls).filter((s) =>
             allowedSubjects.includes(s)
         );
 

@@ -17,15 +17,15 @@ import {
     type TicketResolutionStatus,
     DEFAULT_SOLVER_SETTINGS,
 } from './types';
-import { distributeExams, autoFix, inferGradeLevel } from './logic/solver';
-import { formatWeekId, getWeekTypeForNumber, getWeeksBetween } from './logic/dateUtils';
+import { distributeExams, autoFix, inferGradeLevel, getAllSubjectsForClass } from './logic/solver';
+import { formatWeekId, getWeeksBetween } from './logic/dateUtils';
 import {
     fetchReviewInbox,
     getEffectiveServerUrl,
     getReviewPlanIdFromLocation,
     updateTicketResolution,
 } from './logic/reviewClient';
-import { ImportSection } from './components/ImportSection';
+import { ImportSection, type EdupageCalendarPayload } from './components/ImportSection';
 import { ConfigSection } from './components/ConfigSection';
 import { SubjectSelection } from './components/SubjectSelection';
 import { ScheduleEditor } from './components/ScheduleEditor';
@@ -66,11 +66,11 @@ const DEFAULT_PDF_SETTINGS: PdfSettings = {
     gradesDueDate: '27.10.',
 };
 
-function createDefaultWeeks(weekAParity: 'odd' | 'even' = 'odd'): Week[] {
+function createDefaultWeeks(): Week[] {
     const start = new Date();
     const end = new Date();
     end.setDate(end.getDate() + 21);
-    return getWeeksBetween(start, end, [], { weekAParity });
+    return getWeeksBetween(start, end, []);
 }
 
 function getInitialTheme(): ThemeMode {
@@ -102,11 +102,10 @@ function resolveGradeLevel(className: string, storedGrade?: string): string {
  * so existing assignments, blocked days, and holiday labels are preserved.
  */
 function normalizeAppState(raw: Partial<AppState> | null | undefined): AppState {
-    const parity = raw?.edupageMeta?.weekAParity ?? 'odd';
     const rawWeeks =
         Array.isArray(raw?.weeks) && raw.weeks.length > 0
             ? raw.weeks
-            : createDefaultWeeks(parity);
+            : createDefaultWeeks();
     const weekIdMap = new Map<string, string>();
     const weeks: Week[] = rawWeeks.map((w) => {
         const canonicalId = formatWeekId(w.year, w.weekNumber);
@@ -116,7 +115,6 @@ function normalizeAppState(raw: Partial<AppState> | null | undefined): AppState 
         return {
             ...w,
             id: canonicalId,
-            weekType: w.weekType === 'B' ? 'B' : 'A',
         };
     });
 
@@ -498,30 +496,193 @@ function PlannerWorkspace() {
         return () => clearTimeout(timer);
     }, [appState, bridgeOnline]);
 
+    const mergeSchedulesPreservingCustom = useCallback(
+        (prevClasses: ClassSchedule[], incomingSchedules: ClassSchedule[]): ClassSchedule[] => {
+            const updatedClasses = [...prevClasses];
+            for (const rawNew of incomingSchedules) {
+                const newCls: ClassSchedule = {
+                    ...rawNew,
+                    gradeLevel: resolveGradeLevel(rawNew.className, rawNew.gradeLevel),
+                };
+                const index = updatedClasses.findIndex((c) => c.className === newCls.className);
+                if (index >= 0) {
+                    const existing = updatedClasses[index];
+                    updatedClasses[index] = {
+                        ...newCls,
+                        gradeLevel: resolveGradeLevel(newCls.className, existing.gradeLevel),
+                        examTeacherBySubject: existing.examTeacherBySubject,
+                    };
+                } else {
+                    updatedClasses.push(newCls);
+                }
+            }
+            return updatedClasses;
+        },
+        []
+    );
+
+    const applyEdupageBlocksForWeeks = useCallback(
+        (
+            targetWeekIds: string[],
+            importedClassNames: string[],
+            calendarSync: EdupageCalendarPayload,
+            overwriteWeeks: boolean
+        ) => {
+            const weekSet = new Set(targetWeekIds);
+            const nb = calendarSync.blockedDays || {};
+            const nl = calendarSync.holidayLabels || {};
+            const ncb = calendarSync.blockedClassDays || {};
+
+            setBlockedDays((prev) => {
+                const next = { ...prev };
+                for (const wid of weekSet) {
+                    if (overwriteWeeks) {
+                        if (nb[wid]) next[wid] = { ...nb[wid] };
+                        else delete next[wid];
+                    } else if (nb[wid]) {
+                        next[wid] = { ...(next[wid] || {}), ...nb[wid] };
+                    }
+                }
+                return next;
+            });
+
+            setHolidayLabels((prev) => {
+                const next = { ...prev };
+                for (const wid of weekSet) {
+                    if (overwriteWeeks) {
+                        if (nl[wid]) next[wid] = { ...nl[wid] };
+                        else delete next[wid];
+                    } else if (nl[wid]) {
+                        next[wid] = { ...(next[wid] || {}), ...nl[wid] };
+                    }
+                }
+                return next;
+            });
+
+            if (importedClassNames.length > 0) {
+                setBlockedClassDays((prev) => {
+                    const next = { ...prev };
+                    for (const cname of importedClassNames) {
+                        const clsWeeks = { ...(next[cname] || {}) };
+                        for (const wid of weekSet) {
+                            const incomingDayMap = ncb[cname]?.[wid];
+                            if (overwriteWeeks) {
+                                if (incomingDayMap) clsWeeks[wid] = { ...incomingDayMap };
+                                else delete clsWeeks[wid];
+                            } else if (incomingDayMap) {
+                                clsWeeks[wid] = { ...(clsWeeks[wid] || {}), ...incomingDayMap };
+                            }
+                        }
+                        next[cname] = clsWeeks;
+                    }
+                    return next;
+                });
+            }
+        },
+        []
+    );
+
     const syncEdupageCalendar = useCallback(
         async (
             targetWeeks: Week[],
             targetClasses: ClassSchedule[],
-            selectedIds?: string[]
+            selectedIds?: string[],
+            useShortSubjects = true
         ) => {
             if (!bridgeOnline || targetWeeks.length === 0) return;
             setEdupageSyncLoading(true);
             try {
+                const weekIds = targetWeeks.map((w) => w.id);
+                const weeksPayload = targetWeeks.map((w) => ({
+                    id: w.id,
+                    year: w.year,
+                    weekNumber: w.weekNumber,
+                }));
+
+                // When EduPage classes are selected, fetch exact concrete week-by-week timetables + free days
+                if (selectedIds && selectedIds.length > 0) {
+                    const res = await fetch('/api/edupage/fetch-timetables', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            classIds: selectedIds,
+                            weeks: weeksPayload,
+                            useShortSubjects,
+                        }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        if (res.status !== 401) {
+                            setEdupageSyncMessage(
+                                data.error || 'EduPage-Zeitraumabgleich fehlgeschlagen.'
+                            );
+                        }
+                        return;
+                    }
+
+                    const schedules = (data.schedules || []) as ClassSchedule[];
+                    const newBlocked = (data.blockedDays || {}) as BlockedDays;
+                    const newLabels = (data.holidayLabels || {}) as HolidayLabels;
+                    const newClassBlocked = (data.blockedClassDays || {}) as BlockedClassDays;
+
+                    if (schedules.length > 0) {
+                        setClasses((prev) => mergeSchedulesPreservingCustom(prev, schedules));
+                    }
+                    applyEdupageBlocksForWeeks(
+                        weekIds,
+                        schedules.map((s) => s.className),
+                        {
+                            blockedDays: newBlocked,
+                            holidayLabels: newLabels,
+                            blockedClassDays: newClassBlocked,
+                        },
+                        false
+                    );
+
+                    const nowIso = new Date().toISOString();
+                    setEdupageMeta((prev) => ({
+                        ...(prev || {}),
+                        lastSyncAt: data.fetchedAt || nowIso,
+                        lastHolidaySyncAt: data.fetchedAt || nowIso,
+                    }));
+
+                    const globalHolCount = Object.values(newBlocked).reduce(
+                        (acc, dayMap) => acc + Object.values(dayMap).filter(Boolean).length,
+                        0
+                    );
+                    const classFreeCount = Object.values(newClassBlocked).reduce(
+                        (acc, wMap) =>
+                            acc +
+                            Object.values(wMap).reduce(
+                                (a2, dMap) => a2 + Object.values(dMap).filter(Boolean).length,
+                                0
+                            ),
+                        0
+                    );
+                    const activeDays = Number(data.activeSchoolDaysFound || 0);
+                    if (activeDays === 0 && globalHolCount === 0 && classFreeCount === 0) {
+                        setEdupageSyncMessage(
+                            'Hinweis: Für diesen Zeitraum sind in EduPage noch keine Unterrichts-/Ferienereignisse veröffentlicht.'
+                        );
+                    } else {
+                        setEdupageSyncMessage(
+                            `EduPage-Sync (${targetWeeks.length} Wo.): ${globalHolCount} Ferientage, ${classFreeCount} klassenbezogene freie Tage geprüft.`
+                        );
+                    }
+                    return;
+                }
+
+                // Fallback when no EduPage class selection exists yet: sync school-wide holidays
                 const res = await fetch('/api/edupage/sync-calendar', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        weeks: targetWeeks.map((w) => ({
-                            id: w.id,
-                            year: w.year,
-                            weekNumber: w.weekNumber,
-                        })),
+                        weeks: weeksPayload,
                         referenceSchedules: targetClasses.map((c) => ({
                             className: c.className,
                             subjects: c.subjects,
-                            subjectsB: c.subjectsB,
                         })),
-                        classIds: selectedIds || [],
+                        classIds: [],
                     }),
                 });
                 const data = await res.json();
@@ -534,32 +695,12 @@ function PlannerWorkspace() {
 
                 const newBlocked = (data.blockedDays || {}) as BlockedDays;
                 const newLabels = (data.holidayLabels || {}) as HolidayLabels;
-                const detectedWeekTypes = (data.weekTypes || {}) as Record<string, 'A' | 'B'>;
-
-                setBlockedDays((prev) => {
-                    const next = { ...prev };
-                    for (const [wid, dMap] of Object.entries(newBlocked)) {
-                        next[wid] = { ...(next[wid] || {}), ...dMap };
-                    }
-                    return next;
-                });
-
-                setHolidayLabels((prev) => {
-                    const next = { ...prev };
-                    for (const [wid, lMap] of Object.entries(newLabels)) {
-                        next[wid] = { ...(next[wid] || {}), ...lMap };
-                    }
-                    return next;
-                });
-
-                const updatedAbCount = Object.keys(detectedWeekTypes).length;
-                if (updatedAbCount > 0) {
-                    setWeeks((prev) =>
-                        prev.map((w) =>
-                            detectedWeekTypes[w.id] ? { ...w, weekType: detectedWeekTypes[w.id] } : w
-                        )
-                    );
-                }
+                applyEdupageBlocksForWeeks(
+                    weekIds,
+                    [],
+                    { blockedDays: newBlocked, holidayLabels: newLabels },
+                    false
+                );
 
                 setEdupageMeta((prev) => ({
                     ...(prev || {}),
@@ -574,10 +715,7 @@ function PlannerWorkspace() {
                     );
                 } else {
                     setEdupageSyncMessage(
-                        `EduPage-Sync: ${holCount} schulfreie Tage/Ferien automatisch gesperrt` +
-                            (updatedAbCount > 0
-                                ? ` · ${updatedAbCount} Wochen auf A/B geprüft.`
-                                : '.')
+                        `EduPage-Sync: ${holCount} schulfreie Tage/Ferien automatisch gesperrt.`
                     );
                 }
             } catch {
@@ -586,10 +724,10 @@ function PlannerWorkspace() {
                 setEdupageSyncLoading(false);
             }
         },
-        [bridgeOnline]
+        [bridgeOnline, mergeSchedulesPreservingCustom, applyEdupageBlocksForWeeks]
     );
 
-    // Automatically fetch EduPage holidays, school days & A/B weeks whenever Klausurzeitraum changes while logged in
+    // Automatically fetch concrete EduPage schedules & free days whenever Klausurzeitraum changes while logged in
     const weeksRangeKey = useMemo(() => weeks.map((w) => w.id).join(','), [weeks]);
     useEffect(() => {
         if (!bridgeOnline || !edupageLoggedIn || weeks.length === 0) return;
@@ -599,7 +737,12 @@ function PlannerWorkspace() {
         lastSyncedKeyRef.current = syncKey;
 
         const timer = setTimeout(() => {
-            void syncEdupageCalendar(weeks, classes, edupageMeta?.selectedClassIds);
+            void syncEdupageCalendar(
+                weeks,
+                classes,
+                edupageMeta?.selectedClassIds,
+                edupageMeta?.useShortSubjects ?? true
+            );
         }, 150);
         return () => clearTimeout(timer);
     }, [
@@ -609,56 +752,29 @@ function PlannerWorkspace() {
         weeks,
         classes,
         edupageMeta?.selectedClassIds,
+        edupageMeta?.useShortSubjects,
         syncEdupageCalendar,
     ]);
 
-    const handleImport = (schedules: ClassSchedule[], meta?: EdupageMeta) => {
+    const handleImport = (
+        schedules: ClassSchedule[],
+        meta?: EdupageMeta,
+        calendarSync?: EdupageCalendarPayload
+    ) => {
         const previousClasses = classes;
-        const updatedClasses = [...previousClasses];
-
-        for (const rawNew of schedules) {
-            const newCls: ClassSchedule = {
-                ...rawNew,
-                gradeLevel: resolveGradeLevel(rawNew.className, rawNew.gradeLevel),
-            };
-            const index = updatedClasses.findIndex((c) => c.className === newCls.className);
-            if (index >= 0) {
-                updatedClasses[index] = {
-                    ...newCls,
-                    gradeLevel: resolveGradeLevel(
-                        newCls.className,
-                        updatedClasses[index].gradeLevel
-                    ),
-                    examTeacherBySubject: updatedClasses[index].examTeacherBySubject,
-                };
-            } else {
-                updatedClasses.push(newCls);
-            }
-        }
+        const updatedClasses = mergeSchedulesPreservingCustom(previousClasses, schedules);
         setClasses(updatedClasses);
 
         // Non-destructive subject selection: preserve unchecked subjects for existing classes
         setSelectedSubjects((prev) => {
             const next = { ...prev };
             for (const cls of schedules) {
-                const allNew = Array.from(
-                    new Set([
-                        ...Object.values(cls.subjects).flat(),
-                        ...(cls.subjectsB ? Object.values(cls.subjectsB).flat() : []),
-                    ])
-                );
+                const allNew = getAllSubjectsForClass(cls);
                 if (!(cls.className in prev)) {
                     next[cls.className] = allNew;
                 } else {
                     const existingClass = previousClasses.find((c) => c.className === cls.className);
-                    const oldAll = existingClass
-                        ? new Set([
-                              ...Object.values(existingClass.subjects).flat(),
-                              ...(existingClass.subjectsB
-                                  ? Object.values(existingClass.subjectsB).flat()
-                                  : []),
-                          ])
-                        : new Set<string>();
+                    const oldAll = new Set(existingClass ? getAllSubjectsForClass(existingClass) : []);
                     const kept = (prev[cls.className] || []).filter((s) => allNew.includes(s));
                     const brandNew = allNew.filter((s) => !oldAll.has(s) && !kept.includes(s));
                     next[cls.className] = [...kept, ...brandNew];
@@ -667,22 +783,47 @@ function PlannerWorkspace() {
             return next;
         });
 
+        if (calendarSync) {
+            applyEdupageBlocksForWeeks(
+                weeks.map((w) => w.id),
+                schedules.map((s) => s.className),
+                calendarSync,
+                true
+            );
+        }
+
         if (meta) {
-            setEdupageMeta((prev) => ({ ...(prev || {}), ...meta }));
-            const nextWeeks = meta.weekAParity
-                ? weeks.map((w) => ({
-                      ...w,
-                      weekType: getWeekTypeForNumber(w.weekNumber, meta.weekAParity),
-                  }))
-                : weeks;
-            if (meta.weekAParity) {
-                setWeeks(nextWeeks);
-            }
-            const syncKey = `${nextWeeks.map((w) => w.id).join(',')}::${(
+            const syncKey = `${weeks.map((w) => w.id).join(',')}::${(
                 meta.selectedClassIds || []
             ).join(',')}`;
             lastSyncedKeyRef.current = syncKey;
-            void syncEdupageCalendar(nextWeeks, updatedClasses, meta.selectedClassIds);
+            setEdupageMeta((prev) => ({ ...(prev || {}), ...meta }));
+
+            const holCount = Object.values(calendarSync?.blockedDays || {}).reduce(
+                (acc, dayMap) => acc + Object.values(dayMap).filter(Boolean).length,
+                0
+            );
+            const classFreeCount = Object.values(calendarSync?.blockedClassDays || {}).reduce(
+                (acc, wMap) =>
+                    acc +
+                    Object.values(wMap).reduce(
+                        (a2, dMap) => a2 + Object.values(dMap).filter(Boolean).length,
+                        0
+                    ),
+                0
+            );
+            if (calendarSync) {
+                setEdupageSyncMessage(
+                    `EduPage-Sync (${weeks.length} Wo.): ${holCount} Ferientage, ${classFreeCount} klassenbezogene freie Tage übernommen.`
+                );
+            } else {
+                void syncEdupageCalendar(
+                    weeks,
+                    updatedClasses,
+                    meta.selectedClassIds,
+                    meta.useShortSubjects ?? true
+                );
+            }
         }
     };
 
@@ -769,14 +910,6 @@ function PlannerWorkspace() {
                 },
             };
         });
-    };
-
-    const handleToggleWeekType = (weekId: string) => {
-        setWeeks((prev) =>
-            prev.map((w) =>
-                w.id === weekId ? { ...w, weekType: w.weekType === 'A' ? 'B' : 'A' } : w
-            )
-        );
     };
 
     const handleExport = () => {
@@ -1183,6 +1316,8 @@ function PlannerWorkspace() {
                         }}
                     >
                         <ImportSection
+                            weeks={weeks}
+                            onUpdateWeeks={setWeeks}
                             onImport={handleImport}
                             onLoginStateChange={setEdupageLoggedIn}
                             edupageMeta={edupageMeta}
@@ -1195,7 +1330,6 @@ function PlannerWorkspace() {
                             onUpdateWeeks={setWeeks}
                             blockedDays={blockedDays}
                             holidayLabels={holidayLabels}
-                            weekAParity={edupageMeta?.weekAParity || 'odd'}
                             edupageSyncLoading={edupageSyncLoading}
                             edupageSyncMessage={edupageSyncMessage}
                             pdfSettings={pdfSettings}
@@ -1230,7 +1364,11 @@ function PlannerWorkspace() {
                 )}
 
                 {activeTab === 'schedules' && (
-                    <ScheduleEditor classes={classes} onUpdateClass={handleUpdateClass} />
+                    <ScheduleEditor
+                        classes={classes}
+                        weeks={weeks}
+                        onUpdateClass={handleUpdateClass}
+                    />
                 )}
 
                 {activeTab === 'calendar' && (
@@ -1257,7 +1395,6 @@ function PlannerWorkspace() {
                             onTogglePin={handleTogglePin}
                             onToggleBlockClassDay={handleToggleBlockClassDay}
                             onToggleBlockGlobalDay={handleToggleBlockGlobalDay}
-                            onToggleWeekType={handleToggleWeekType}
                             highlightedExamId={highlightedExamId}
                         />
                     </>

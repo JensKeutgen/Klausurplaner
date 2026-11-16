@@ -111,7 +111,6 @@ interface CalendarBoardProps {
     onTogglePin: (examId: string) => void;
     onToggleBlockClassDay?: (className: string, weekId: string, day: DayOfWeek) => void;
     onToggleBlockGlobalDay?: (weekId: string, day: DayOfWeek) => void;
-    onToggleWeekType?: (weekId: string) => void;
     highlightedExamId?: string | null;
 }
 
@@ -129,7 +128,6 @@ export function CalendarBoard({
     onTogglePin,
     onToggleBlockClassDay,
     onToggleBlockGlobalDay,
-    onToggleWeekType,
     highlightedExamId,
 }: CalendarBoardProps) {
     const [activeDraggable, setActiveDraggable] = useState<Exam | null>(null);
@@ -571,22 +569,6 @@ export function CalendarBoard({
                                     >
                                         {week.id}
                                     </span>
-                                    <button
-                                        type="button"
-                                        onClick={() => onToggleWeekType?.(week.id)}
-                                        style={{
-                                            fontSize: '0.7rem',
-                                            padding: '2px 7px',
-                                            borderRadius: '5px',
-                                            border: 'none',
-                                            background: week.weekType === 'A' ? 'var(--accent-primary)' : 'var(--accent-purple)',
-                                            color: '#fff',
-                                            fontWeight: 700,
-                                        }}
-                                        title="Wochentyp umschalten (A/B)"
-                                    >
-                                        {week.weekType}
-                                    </button>
                                 </div>
                             ))}
 
@@ -699,11 +681,16 @@ export function CalendarBoard({
                                                 );
 
                                                 const isGlobalBlocked = !!state.blockedDays[week.id]?.[day] || week.isBlocked;
-                                                const isBlocked =
-                                                    isGlobalBlocked ||
-                                                    !!state.blockedClassDays?.[cls.className]?.[week.id]?.[day];
+                                                const isClassBlocked = !!state.blockedClassDays?.[cls.className]?.[week.id]?.[day];
+                                                const isBlocked = isGlobalBlocked || isClassBlocked;
                                                 const holidayLabel = state.holidayLabels?.[week.id]?.[day];
+                                                const classFreeReason = cls.weeklySchedules?.[week.id]?.freeDays?.[day];
                                                 const isHoliday = Boolean(holidayLabel) && isGlobalBlocked;
+                                                const effectiveCellLabel = isHoliday
+                                                    ? holidayLabel
+                                                    : isClassBlocked
+                                                        ? classFreeReason
+                                                        : undefined;
 
                                                 const isHighlight =
                                                     !!activeDraggable &&
@@ -713,7 +700,7 @@ export function CalendarBoard({
                                                         cls,
                                                         activeDraggable.subject,
                                                         day,
-                                                        week.weekType
+                                                        week.id
                                                     );
 
                                                 return (
@@ -722,7 +709,7 @@ export function CalendarBoard({
                                                             id={getCellId(cls.className, week.id, day)}
                                                             isBlocked={isBlocked}
                                                             isHoliday={isHoliday}
-                                                            holidayLabel={isHoliday ? holidayLabel : undefined}
+                                                            holidayLabel={effectiveCellLabel}
                                                             isHighlight={isHighlight}
                                                             onClick={() => onToggleBlockClassDay?.(cls.className, week.id, day)}
                                                         >
@@ -743,7 +730,7 @@ export function CalendarBoard({
                                                                     cls,
                                                                     exam.subject,
                                                                     day,
-                                                                    week.weekType
+                                                                    week.id
                                                                 );
                                                                 const hasChosenTeacher = Boolean(
                                                                     cls.examTeacherBySubject?.[exam.subject]

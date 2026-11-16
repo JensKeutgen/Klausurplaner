@@ -88,11 +88,11 @@ function getExamTeachers(
     cls: ClassSchedule | undefined,
     subject: string,
     day: DayOfWeek | null,
-    weekType: 'A' | 'B'
+    weekId?: string
 ): string[] {
     if (!cls) return [];
     if (day) {
-        const effective = getEffectiveExamTeachers(cls, subject, day, weekType);
+        const effective = getEffectiveExamTeachers(cls, subject, day, weekId);
         if (effective.length > 0) return effective;
     }
     const chosen = cls.examTeacherBySubject?.[subject];
@@ -124,7 +124,7 @@ export function collectEmailRecipients(
                 cls,
                 exam.subject,
                 exam.assignedDay,
-                week?.weekType || 'A'
+                week?.id
             );
             for (const t of teachers) {
                 addTeacher(cls, t);
@@ -134,7 +134,7 @@ export function collectEmailRecipients(
         for (const cls of state.classes) {
             const subs = state.selectedSubjects[cls.className] || [];
             for (const sub of subs) {
-                const teachers = getExamTeachers(cls, sub, null, 'A');
+                const teachers = getExamTeachers(cls, sub, null);
                 for (const t of teachers) {
                     addTeacher(cls, t);
                 }
@@ -172,7 +172,7 @@ export function buildEmailDraft(
             cls,
             exam.subject,
             exam.assignedDay,
-            week?.weekType || 'A'
+            week?.id
         ).map((t) => cls?.teacherNames?.[t] || t);
 
         if (week && exam.assignedDay) {
