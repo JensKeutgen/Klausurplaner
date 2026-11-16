@@ -80,6 +80,75 @@ export interface EdupageMeta {
   weekAParity?: 'odd' | 'even';
 }
 
+export interface ReviewSyncMeta {
+  serverUrl?: string; // Optional when running locally on dev:local
+  planId?: string;
+  adminToken?: string;
+  lastPublishedAt?: string;
+  isActive?: boolean;
+}
+
+export type ExamFeedbackStatus = 'ok' | 'not_ok';
+export type ExamChangePreference = 'earlier' | 'later' | 'not_this_day';
+export type DayWishType = 'no_go' | 'prefer';
+export type TicketResolutionStatus = 'open' | 'applied' | 'dismissed';
+
+export interface ReviewExamFeedback {
+  id: string;
+  examId: string;
+  className: string;
+  subject: string;
+  status: ExamFeedbackStatus;
+  preference: ExamChangePreference | null;
+  note: string;
+  resolutionStatus: TicketResolutionStatus;
+  resolutionNote: string;
+  updatedAt?: string;
+}
+
+export interface ReviewDayWish {
+  id: string;
+  weekId: string;
+  day: DayOfWeek;
+  className: string | null; // null = gilt für alle Klassen der Lehrkraft
+  wishType: DayWishType;
+  note: string;
+  resolutionStatus: TicketResolutionStatus;
+  resolutionNote: string;
+  updatedAt?: string;
+}
+
+export interface ReviewSubmission {
+  id: string;
+  planId: string;
+  teacherCode: string;
+  overallStatus: 'ok' | 'has_requests';
+  generalNote: string;
+  createdAt: string;
+  updatedAt: string;
+  examFeedback: ReviewExamFeedback[];
+  dayWishes: ReviewDayWish[];
+}
+
+export interface ReviewPlanSnapshot {
+  classes: ClassSchedule[];
+  weeks: Week[];
+  exams: Exam[];
+  blockedDays: BlockedDays;
+  blockedClassDays: BlockedClassDays;
+  selectedSubjects: Record<string, string[]>;
+  pdfSettings: PdfSettings;
+  solverSettings?: SolverSettings;
+}
+
+export interface ReviewPlanData {
+  id: string;
+  title: string;
+  isActive: boolean;
+  updatedAt: string;
+  snapshot: ReviewPlanSnapshot;
+}
+
 export interface AppState {
   classes: ClassSchedule[];
   weeks: Week[];
@@ -93,4 +162,6 @@ export interface AppState {
   pdfSettings: PdfSettings;
   solverSettings?: SolverSettings;
   edupageMeta?: EdupageMeta;
+  reviewSync?: ReviewSyncMeta;
 }
+

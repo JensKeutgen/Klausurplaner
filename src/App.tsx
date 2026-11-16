@@ -12,16 +12,28 @@ import {
     type SolverSettings,
     type EdupageMeta,
     type SubjectTimingPreference,
+    type ReviewSyncMeta,
+    type ReviewSubmission,
+    type TicketResolutionStatus,
     DEFAULT_SOLVER_SETTINGS,
 } from './types';
 import { distributeExams, autoFix, inferGradeLevel } from './logic/solver';
 import { formatWeekId, getWeekTypeForNumber, getWeeksBetween } from './logic/dateUtils';
 import { applyPublicHolidaysToWeeks, GERMAN_STATES, type GermanStateCode } from './logic/holidays';
+import {
+    fetchReviewInbox,
+    getEffectiveServerUrl,
+    getReviewPlanIdFromLocation,
+    updateTicketResolution,
+} from './logic/reviewClient';
 import { ImportSection } from './components/ImportSection';
 import { ConfigSection } from './components/ConfigSection';
 import { SubjectSelection } from './components/SubjectSelection';
 import { ScheduleEditor } from './components/ScheduleEditor';
 import { CalendarBoard } from './components/CalendarBoard';
+import { ReviewPage } from './components/ReviewPage';
+import { ReviewPublishModal } from './components/ReviewPublishModal';
+import { ReviewInboxPanel } from './components/ReviewInboxPanel';
 import { generatePDF } from './logic/pdfGenerator';
 import {
     Download,
@@ -38,6 +50,7 @@ import {
     BookOpen,
     Wand2,
     FileDown,
+    Inbox,
 } from 'lucide-react';
 
 type WorkspaceTab = 'import' | 'subjects' | 'schedules' | 'calendar';
@@ -144,6 +157,7 @@ function normalizeAppState(raw: Partial<AppState> | null | undefined): AppState 
         pdfSettings: raw?.pdfSettings || DEFAULT_PDF_SETTINGS,
         solverSettings: { ...DEFAULT_SOLVER_SETTINGS, ...(raw?.solverSettings || {}) },
         edupageMeta: raw?.edupageMeta,
+        reviewSync: raw?.reviewSync,
     };
 }
 
@@ -160,6 +174,18 @@ function loadInitialState(): AppState {
 }
 
 function App() {
+    useEffect(() => {
+        document.documentElement.dataset.theme = getInitialTheme();
+    }, []);
+
+    const reviewPlanId = getReviewPlanIdFromLocation();
+    if (reviewPlanId) {
+        return <ReviewPage planId={reviewPlanId} />;
+    }
+    return <PlannerWorkspace />;
+}
+
+function PlannerWorkspace() {
     const initialState = useMemo(() => loadInitialState(), []);
 
     const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
@@ -195,6 +221,17 @@ function App() {
     const [edupageMeta, setEdupageMeta] = useState<EdupageMeta | undefined>(
         initialState.edupageMeta
     );
+    const [reviewSync, setReviewSync] = useState<ReviewSyncMeta | undefined>(
+        initialState.reviewSync
+    );
+
+    // Collaborative review & inbox state
+    const [publishModalOpen, setPublishModalOpen] = useState(false);
+    const [inboxOpen, setInboxOpen] = useState(Boolean(initialState.reviewSync?.planId));
+    const [reviewSubmissions, setReviewSubmissions] = useState<ReviewSubmission[]>([]);
+    const [inboxLoading, setInboxLoading] = useState(false);
+    const [inboxError, setInboxError] = useState<string | null>(null);
+    const [highlightedExamId, setHighlightedExamId] = useState<string | null>(null);
 
     // Local bridge & EduPage sync state
     const [bridgeOnline, setBridgeOnline] = useState(false);
@@ -240,6 +277,7 @@ function App() {
             pdfSettings,
             solverSettings,
             edupageMeta,
+            reviewSync,
         }),
         [
             classes,
@@ -254,7 +292,103 @@ function App() {
             pdfSettings,
             solverSettings,
             edupageMeta,
+            reviewSync,
         ]
+    );
+
+    const refreshInbox = useCallback(async (syncOverride?: ReviewSyncMeta) => {
+        const sync = syncOverride || reviewSync;
+        if (!sync?.planId || !sync?.adminToken) return;
+        const serverUrl = getEffectiveServerUrl(sync.serverUrl);
+        if (!serverUrl) return;
+
+        setInboxLoading(true);
+        setInboxError(null);
+        try {
+            const res = await fetchReviewInbox(serverUrl, sync.planId, sync.adminToken);
+            setReviewSubmissions(res.submissions || []);
+        } catch (err) {
+            setInboxError(err instanceof Error ? err.message : 'Rückmeldungen konnten nicht geladen werden.');
+        } finally {
+            setInboxLoading(false);
+        }
+    }, [reviewSync]);
+
+    useEffect(() => {
+        if (reviewSync?.planId && reviewSync?.adminToken) {
+            refreshInbox();
+        }
+    }, [reviewSync?.planId, reviewSync?.adminToken, refreshInbox]);
+
+    const handleApplyBlockedDay = useCallback((classNames: string[], weekId: string, day: DayOfWeek) => {
+        setBlockedClassDays((prev) => {
+            const next = { ...prev };
+            for (const clsName of classNames) {
+                const clsBlocks = next[clsName] || {};
+                const weekBlocks = clsBlocks[weekId] || {};
+                next[clsName] = {
+                    ...clsBlocks,
+                    [weekId]: {
+                        ...weekBlocks,
+                        [day]: true,
+                    },
+                };
+            }
+            return next;
+        });
+    }, []);
+
+    const handleUpdateTicketResolution = useCallback(
+        async (
+            itemType: 'exam' | 'wish',
+            itemId: string,
+            status: TicketResolutionStatus,
+            note = ''
+        ) => {
+            if (!reviewSync?.planId || !reviewSync?.adminToken) return;
+            const serverUrl = getEffectiveServerUrl(reviewSync.serverUrl);
+            await updateTicketResolution(
+                serverUrl,
+                reviewSync.planId,
+                reviewSync.adminToken,
+                itemType,
+                itemId,
+                status,
+                note
+            );
+            setReviewSubmissions((prev) =>
+                prev.map((sub) => ({
+                    ...sub,
+                    examFeedback:
+                        itemType === 'exam'
+                            ? sub.examFeedback.map((ef) =>
+                                  ef.id === itemId ? { ...ef, resolutionStatus: status, resolutionNote: note } : ef
+                              )
+                            : sub.examFeedback,
+                    dayWishes:
+                        itemType === 'wish'
+                            ? sub.dayWishes.map((dw) =>
+                                  dw.id === itemId ? { ...dw, resolutionStatus: status, resolutionNote: note } : dw
+                              )
+                            : sub.dayWishes,
+                }))
+            );
+        },
+        [reviewSync]
+    );
+
+    const openInboxTicketCount = useMemo(
+        () =>
+            reviewSubmissions.reduce(
+                (acc, sub) =>
+                    acc +
+                    (sub.examFeedback || []).filter(
+                        (ef) => ef.status === 'not_ok' && ef.resolutionStatus === 'open'
+                    ).length +
+                    (sub.dayWishes || []).filter((dw) => dw.resolutionStatus === 'open').length,
+                0
+            ),
+        [reviewSubmissions]
     );
 
     const applyNormalizedState = useCallback((norm: AppState) => {
@@ -270,6 +404,7 @@ function App() {
         setPdfSettings(norm.pdfSettings);
         setSolverSettings(norm.solverSettings || DEFAULT_SOLVER_SETTINGS);
         setEdupageMeta(norm.edupageMeta);
+        setReviewSync(norm.reviewSync);
     }, []);
 
     // Check local bridge health & hydrate from disk file if localStorage has no classes yet
@@ -864,6 +999,31 @@ function App() {
 
                         <button
                             type="button"
+                            onClick={() => setPublishModalOpen(true)}
+                            disabled={classes.length === 0}
+                            className="ui-btn"
+                            title="Plan für Kollegen freigeben und Rückmeldungen verwalten"
+                        >
+                            <Inbox size={15} color="var(--accent-primary)" />
+                            Abstimmung
+                            {openInboxTicketCount > 0 && (
+                                <span
+                                    style={{
+                                        fontSize: '0.7rem',
+                                        padding: '0 6px',
+                                        borderRadius: '999px',
+                                        background: 'var(--accent-warning)',
+                                        color: '#1e293b',
+                                        fontWeight: 700,
+                                    }}
+                                >
+                                    {openInboxTicketCount}
+                                </span>
+                            )}
+                        </button>
+
+                        <button
+                            type="button"
                             onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
                             className="ui-btn"
                             style={{ padding: '7px 9px' }}
@@ -1025,16 +1185,46 @@ function App() {
                 )}
 
                 {activeTab === 'calendar' && (
-                    <CalendarBoard
-                        state={appState}
-                        onMoveExam={handleMoveExam}
-                        onTogglePin={handleTogglePin}
-                        onToggleBlockClassDay={handleToggleBlockClassDay}
-                        onToggleBlockGlobalDay={handleToggleBlockGlobalDay}
-                        onToggleWeekType={handleToggleWeekType}
-                    />
+                    <>
+                        {(classes.length > 0 || reviewSync?.planId) && (
+                            <ReviewInboxPanel
+                                appState={appState}
+                                submissions={reviewSubmissions}
+                                loading={inboxLoading}
+                                error={inboxError}
+                                isOpen={inboxOpen}
+                                onToggleOpen={() => setInboxOpen((v) => !v)}
+                                onRefresh={() => refreshInbox()}
+                                onOpenPublishModal={() => setPublishModalOpen(true)}
+                                onUpdateResolution={handleUpdateTicketResolution}
+                                onApplyBlockedDay={handleApplyBlockedDay}
+                                onHighlightExam={setHighlightedExamId}
+                                highlightedExamId={highlightedExamId}
+                            />
+                        )}
+                        <CalendarBoard
+                            state={appState}
+                            onMoveExam={handleMoveExam}
+                            onTogglePin={handleTogglePin}
+                            onToggleBlockClassDay={handleToggleBlockClassDay}
+                            onToggleBlockGlobalDay={handleToggleBlockGlobalDay}
+                            onToggleWeekType={handleToggleWeekType}
+                            highlightedExamId={highlightedExamId}
+                        />
+                    </>
                 )}
             </main>
+
+            <ReviewPublishModal
+                isOpen={publishModalOpen}
+                onClose={() => setPublishModalOpen(false)}
+                appState={appState}
+                onUpdateReviewSync={(next) => {
+                    setReviewSync(next);
+                    setInboxOpen(true);
+                }}
+                onRefreshInbox={() => refreshInbox()}
+            />
         </div>
     );
 }

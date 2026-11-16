@@ -8,6 +8,7 @@ interface ExamCardProps {
     exam: Exam;
     isOverlay?: boolean;
     isValid?: boolean;
+    isHighlighted?: boolean;
     validationReason?: string;
     validationWarning?: string;
     teachers?: string[];
@@ -20,6 +21,7 @@ export function ExamCard({
     exam,
     isOverlay,
     isValid = true,
+    isHighlighted = false,
     validationReason,
     validationWarning,
     teachers,
@@ -70,12 +72,16 @@ export function ExamCard({
         >
             <div
                 style={{
-                    background: bg,
-                    border: `1px solid ${borderColor}`,
+                    background: isHighlighted && isValid ? 'var(--accent-soft)' : bg,
+                    border: `1px solid ${isHighlighted && isValid ? 'var(--accent-primary)' : borderColor}`,
                     borderLeft: `3px solid ${!isValid ? 'var(--accent-danger)' : validationWarning ? 'var(--accent-warning)' : 'var(--accent-primary)'}`,
                     padding: '4px 6px',
                     borderRadius: '6px',
-                    boxShadow: isOverlay ? 'var(--shadow-lg)' : 'var(--shadow-sm)',
+                    boxShadow: isHighlighted
+                        ? '0 0 0 2px var(--accent-primary)'
+                        : isOverlay
+                            ? 'var(--shadow-lg)'
+                            : 'var(--shadow-sm)',
                     fontSize: '0.8rem',
                     position: 'relative',
                     cursor: 'grab',

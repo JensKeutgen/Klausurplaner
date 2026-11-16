@@ -112,6 +112,7 @@ interface CalendarBoardProps {
     onToggleBlockClassDay?: (className: string, weekId: string, day: DayOfWeek) => void;
     onToggleBlockGlobalDay?: (weekId: string, day: DayOfWeek) => void;
     onToggleWeekType?: (weekId: string) => void;
+    highlightedExamId?: string | null;
 }
 
 const GERMAN_DAY_SHORT: Record<DayOfWeek, string> = {
@@ -129,6 +130,7 @@ export function CalendarBoard({
     onToggleBlockClassDay,
     onToggleBlockGlobalDay,
     onToggleWeekType,
+    highlightedExamId,
 }: CalendarBoardProps) {
     const [activeDraggable, setActiveDraggable] = useState<Exam | null>(null);
     const [gradeFilter, setGradeFilter] = useState<string>('Alle');
@@ -447,6 +449,7 @@ export function CalendarBoard({
                                                         <ExamCard
                                                             key={exam.id}
                                                             exam={exam}
+                                                            isHighlighted={highlightedExamId === exam.id}
                                                             teachers={teachers}
                                                             hasChosenTeacher={Boolean(chosen)}
                                                             timingPref={getExamTimingPreference(exam, timing)}
@@ -751,6 +754,7 @@ export function CalendarBoard({
                                                                         key={exam.id}
                                                                         exam={exam}
                                                                         isValid={check.valid}
+                                                                        isHighlighted={highlightedExamId === exam.id}
                                                                         validationReason={check.reason}
                                                                         validationWarning={check.warning}
                                                                         teachers={teachers}

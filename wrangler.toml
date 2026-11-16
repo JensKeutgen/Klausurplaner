@@ -1,0 +1,11 @@
+name = "klausurplaner"
+compatibility_date = "2026-03-01"
+pages_build_output_dir = "dist"
+
+# Nach dem Anlegen der D1-Datenbank mit `npx wrangler d1 create klausurplaner-review`
+# hier die erzeugte database_id eintragen (oder im Cloudflare Dashboard unter
+# Pages -> Settings -> Functions -> D1 database bindings als `DB` verknüpfen).
+[[d1_databases]]
+binding = "DB"
+database_name = "klausurplaner-review"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
