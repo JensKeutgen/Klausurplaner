@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DAYS_OF_WEEK,
   type DayOfWeek,
@@ -13,7 +13,7 @@ import {
   type Week,
 } from '../types';
 import {
-  extractTeacherCodes,
+  extractTeacherOptions,
   fetchColleaguePlan,
   fetchPlanMeta,
   getExamTeachersNormalized,
@@ -106,6 +106,40 @@ interface CalendarSlotInfo {
   isGlobalBlocked: boolean;
 }
 
+interface DraftSyncSnapshot {
+  teacherCode: string;
+  examFeedbackMap: Record<string, DraftExamFeedback>;
+  dayWishes: DraftDayWish[];
+  generalNote: string;
+  extraExamIds: string[];
+}
+
+function computeTeacherExams(
+  plan: ReviewPlanData,
+  normalizedTeacherCode: string,
+  extraExamIds: string[],
+  examFeedbackMap: Record<string, DraftExamFeedback>
+): Exam[] {
+  if (!normalizedTeacherCode) return [];
+  const weekOrder = new Map(plan.snapshot.weeks.map((w, idx) => [w.id, idx]));
+
+  const matching = plan.snapshot.exams.filter((exam) => {
+    if (extraExamIds.includes(exam.id) || examFeedbackMap[exam.id]) return true;
+    const teachers = getExamTeachersNormalized(exam, plan.snapshot.classes, plan.snapshot.weeks);
+    return teachers.includes(normalizedTeacherCode);
+  });
+
+  return matching.sort((a, b) => {
+    const wa = a.assignedWeekId ? weekOrder.get(a.assignedWeekId) ?? 999 : 999;
+    const wb = b.assignedWeekId ? weekOrder.get(b.assignedWeekId) ?? 999 : 999;
+    if (wa !== wb) return wa - wb;
+    const da = a.assignedDay ? DAY_ORDER[a.assignedDay] : 99;
+    const db = b.assignedDay ? DAY_ORDER[b.assignedDay] : 99;
+    if (da !== db) return da - db;
+    return a.className.localeCompare(b.className, 'de');
+  });
+}
+
 export function ReviewPage({ planId }: ReviewPageProps) {
   const reviewerToken = useMemo(() => getOrCreateReviewerToken(planId), [planId]);
 
@@ -149,7 +183,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
   });
   const [highlightedExamCardId, setHighlightedExamCardId] = useState<string | null>(null);
 
-  // Draft feedback state
+  // Draft feedback state (unlisted exams default to status 'ok' = "Passt")
   const [examFeedbackMap, setExamFeedbackMap] = useState<Record<string, DraftExamFeedback>>({});
   const [extraExamIds, setExtraExamIds] = useState<string[]>([]);
   const [showExtraExamPicker, setShowExtraExamPicker] = useState(false);
@@ -160,18 +194,41 @@ export function ReviewPage({ planId }: ReviewPageProps) {
 
   const [generalNote, setGeneralNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [autoSaveState, setAutoSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const hydrateFromSubmission = (sub: ReviewSubmission | null) => {
-    setSavedSubmission(sub);
-    if (!sub) return;
-    if (sub.teacherCode) {
-      setTeacherCode(sub.teacherCode);
-      saveTeacherCode(planId, sub.teacherCode);
-    }
-    setGeneralNote(sub.generalNote || '');
+  const syncRef = useRef<{
+    timerId: number | null;
+    inFlight: boolean;
+    needsResync: boolean;
+    latestRevision: number;
+    latestDraft: DraftSyncSnapshot | null;
+  }>({
+    timerId: null,
+    inFlight: false,
+    needsResync: false,
+    latestRevision: 0,
+    latestDraft: null,
+  });
 
+  useEffect(() => {
+    const refSnapshot = syncRef.current;
+    return () => {
+      if (refSnapshot.timerId !== null) {
+        window.clearTimeout(refSnapshot.timerId);
+      }
+    };
+  }, []);
+
+  const buildDraftFromSubmission = (sub: ReviewSubmission | null) => {
+    if (!sub) {
+      return {
+        efMap: {} as Record<string, DraftExamFeedback>,
+        wishes: [] as DraftDayWish[],
+        note: '',
+      };
+    }
     const efMap: Record<string, DraftExamFeedback> = {};
     for (const ef of sub.examFeedback || []) {
       efMap[ef.examId] = {
@@ -185,19 +242,31 @@ export function ReviewPage({ planId }: ReviewPageProps) {
         resolutionNote: ef.resolutionNote,
       };
     }
-    setExamFeedbackMap(efMap);
-    setDayWishes(
-      (sub.dayWishes || []).map((dw: ReviewDayWish) => ({
-        id: dw.id,
-        weekId: dw.weekId,
-        day: dw.day,
-        className: dw.className,
-        wishType: dw.wishType,
-        note: dw.note || '',
-        resolutionStatus: dw.resolutionStatus,
-        resolutionNote: dw.resolutionNote,
-      }))
-    );
+    const wishes: DraftDayWish[] = (sub.dayWishes || []).map((dw: ReviewDayWish) => ({
+      id: dw.id,
+      weekId: dw.weekId,
+      day: dw.day,
+      className: dw.className,
+      wishType: dw.wishType,
+      note: dw.note || '',
+      resolutionStatus: dw.resolutionStatus,
+      resolutionNote: dw.resolutionNote,
+    }));
+    return { efMap, wishes, note: sub.generalNote || '' };
+  };
+
+  const hydrateFromSubmission = (sub: ReviewSubmission | null) => {
+    setSavedSubmission(sub);
+    if (!sub) return;
+    if (sub.teacherCode) {
+      setTeacherCode(sub.teacherCode);
+      saveTeacherCode(planId, sub.teacherCode);
+    }
+    const built = buildDraftFromSubmission(sub);
+    setGeneralNote(built.note);
+    setExamFeedbackMap(built.efMap);
+    setDayWishes(built.wishes);
+    setAutoSaveState('saved');
   };
 
   const loadPlan = async () => {
@@ -262,12 +331,17 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     }
   };
 
-  const allTeacherCodes = useMemo(
-    () => (plan ? extractTeacherCodes(plan.snapshot.classes) : []),
+  const allTeacherOptions = useMemo(
+    () => (plan ? extractTeacherOptions(plan.snapshot.classes) : []),
     [plan]
   );
 
   const normalizedTeacherCode = teacherCode.trim().toUpperCase();
+
+  const selectedTeacherOption = useMemo(
+    () => allTeacherOptions.find((o) => o.code === normalizedTeacherCode) || null,
+    [allTeacherOptions, normalizedTeacherCode]
+  );
 
   const myClasses = useMemo(() => {
     if (!plan || !normalizedTeacherCode) return [];
@@ -276,23 +350,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
 
   const myExams = useMemo(() => {
     if (!plan || !normalizedTeacherCode) return [];
-    const weekOrder = new Map(plan.snapshot.weeks.map((w, idx) => [w.id, idx]));
-
-    const matching = plan.snapshot.exams.filter((exam) => {
-      if (extraExamIds.includes(exam.id) || examFeedbackMap[exam.id]) return true;
-      const teachers = getExamTeachersNormalized(exam, plan.snapshot.classes, plan.snapshot.weeks);
-      return teachers.includes(normalizedTeacherCode);
-    });
-
-    return matching.sort((a, b) => {
-      const wa = a.assignedWeekId ? weekOrder.get(a.assignedWeekId) ?? 999 : 999;
-      const wb = b.assignedWeekId ? weekOrder.get(b.assignedWeekId) ?? 999 : 999;
-      if (wa !== wb) return wa - wb;
-      const da = a.assignedDay ? DAY_ORDER[a.assignedDay] : 99;
-      const db = b.assignedDay ? DAY_ORDER[b.assignedDay] : 99;
-      if (da !== db) return da - db;
-      return a.className.localeCompare(b.className, 'de');
-    });
+    return computeTeacherExams(plan, normalizedTeacherCode, extraExamIds, examFeedbackMap);
   }, [plan, normalizedTeacherCode, extraExamIds, examFeedbackMap]);
 
   const otherExams = useMemo(() => {
@@ -365,93 +423,314 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     });
   }, [dayWishes, plan]);
 
+  const runAutoSave = async () => {
+    const state = syncRef.current;
+    if (!plan || !plan.isActive) return;
+    if (state.inFlight) {
+      state.needsResync = true;
+      return;
+    }
+
+    const draft = state.latestDraft;
+    if (!draft || !draft.teacherCode) return;
+
+    const sentRevision = state.latestRevision;
+    state.inFlight = true;
+    setAutoSaveState('saving');
+    setSubmitError(null);
+
+    try {
+      const targetExams = computeTeacherExams(
+        plan,
+        draft.teacherCode,
+        draft.extraExamIds,
+        draft.examFeedbackMap
+      );
+
+      const feedbackList: ReviewExamFeedback[] = targetExams.map((exam) => {
+        const item = draft.examFeedbackMap[exam.id];
+        if (item) {
+          return {
+            id: item.examId,
+            examId: item.examId,
+            className: item.className,
+            subject: item.subject,
+            status: item.status,
+            preference: item.status === 'not_ok' ? item.preference || 'later' : null,
+            note: item.note,
+            resolutionStatus: item.resolutionStatus || 'open',
+            resolutionNote: item.resolutionNote || '',
+          };
+        }
+        return {
+          id: exam.id,
+          examId: exam.id,
+          className: exam.className,
+          subject: exam.subject,
+          status: 'ok',
+          preference: null,
+          note: '',
+          resolutionStatus: 'open',
+          resolutionNote: '',
+        };
+      });
+
+      const res = await submitColleagueFeedback(plan.id, {
+        teacherCode: draft.teacherCode,
+        reviewerToken,
+        generalNote: draft.generalNote,
+        examFeedback: feedbackList.map((f) => ({
+          examId: f.examId,
+          className: f.className,
+          subject: f.subject,
+          status: f.status,
+          preference: f.preference,
+          note: f.note,
+        })),
+        dayWishes: draft.dayWishes.map((w) => ({
+          id: w.id,
+          weekId: w.weekId,
+          day: w.day,
+          className: w.className,
+          wishType: w.wishType,
+          note: w.note,
+        })),
+      });
+
+      setSavedSubmission(res.submission);
+      if (syncRef.current.latestRevision === sentRevision) {
+        setAutoSaveState('saved');
+      }
+    } catch (err) {
+      setAutoSaveState('error');
+      setSubmitError(err instanceof Error ? err.message : 'Fehler beim automatischen Speichern.');
+    } finally {
+      syncRef.current.inFlight = false;
+      if (syncRef.current.needsResync) {
+        syncRef.current.needsResync = false;
+        void runAutoSave();
+      }
+    }
+  };
+
+  const queueAutoSave = (draft: DraftSyncSnapshot, delayMs = 0) => {
+    if (!plan || !plan.isActive || !draft.teacherCode) return;
+    const state = syncRef.current;
+    state.latestRevision += 1;
+    state.latestDraft = draft;
+    if (state.timerId !== null) {
+      window.clearTimeout(state.timerId);
+      state.timerId = null;
+    }
+    state.timerId = window.setTimeout(() => {
+      state.timerId = null;
+      void runAutoSave();
+    }, delayMs > 0 ? delayMs : 10);
+  };
+
+  const flushPendingSync = () => {
+    if (syncRef.current.timerId !== null) {
+      window.clearTimeout(syncRef.current.timerId);
+      syncRef.current.timerId = null;
+      void runAutoSave();
+    }
+  };
+
   const selectTeacher = (code: string) => {
     const clean = code.trim().toUpperCase();
     if (!clean) return;
+    setSubmitMessage(null);
+    setSubmitError(null);
+
+    let nextFb = examFeedbackMap;
+    let nextWishes = dayWishes;
+    let nextNote = generalNote;
+    let nextExtra = extraExamIds;
+
+    if (clean !== normalizedTeacherCode) {
+      if (savedSubmission?.teacherCode?.trim().toUpperCase() === clean) {
+        const built = buildDraftFromSubmission(savedSubmission);
+        nextFb = built.efMap;
+        nextWishes = built.wishes;
+        nextNote = built.note;
+        nextExtra = [];
+      } else {
+        nextFb = {};
+        nextWishes = [];
+        nextNote = '';
+        nextExtra = [];
+      }
+      setExamFeedbackMap(nextFb);
+      setDayWishes(nextWishes);
+      setGeneralNote(nextNote);
+      setExtraExamIds(nextExtra);
+    }
+
     setTeacherCode(clean);
     saveTeacherCode(planId, clean);
     setIsChangingTeacher(false);
     setCustomTeacherInput('');
+
+    queueAutoSave(
+      {
+        teacherCode: clean,
+        examFeedbackMap: nextFb,
+        dayWishes: nextWishes,
+        generalNote: nextNote,
+        extraExamIds: nextExtra,
+      },
+      0
+    );
   };
 
   const setExamStatus = (exam: Exam, status: ExamFeedbackStatus) => {
     setSubmitMessage(null);
-    setExamFeedbackMap((prev) => {
-      const existing = prev[exam.id];
-      return {
-        ...prev,
-        [exam.id]: {
-          examId: exam.id,
-          className: exam.className,
-          subject: exam.subject,
-          status,
-          preference: status === 'not_ok' ? existing?.preference || 'later' : null,
-          note: existing?.note || '',
-          resolutionStatus: existing?.resolutionStatus,
-          resolutionNote: existing?.resolutionNote,
-        },
-      };
-    });
+    const existing = examFeedbackMap[exam.id];
+    const nextFb: Record<string, DraftExamFeedback> = {
+      ...examFeedbackMap,
+      [exam.id]: {
+        examId: exam.id,
+        className: exam.className,
+        subject: exam.subject,
+        status,
+        preference: status === 'not_ok' ? existing?.preference || 'later' : null,
+        note: existing?.note || '',
+        resolutionStatus: existing?.resolutionStatus,
+        resolutionNote: existing?.resolutionNote,
+      },
+    };
+    setExamFeedbackMap(nextFb);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap: nextFb,
+        dayWishes,
+        generalNote,
+        extraExamIds,
+      },
+      0
+    );
   };
 
   const setExamPreference = (exam: Exam, preference: ExamChangePreference) => {
     setSubmitMessage(null);
-    setExamFeedbackMap((prev) => {
-      const existing = prev[exam.id];
-      return {
-        ...prev,
-        [exam.id]: {
-          examId: exam.id,
-          className: exam.className,
-          subject: exam.subject,
-          status: 'not_ok',
-          preference,
-          note: existing?.note || '',
-          resolutionStatus: existing?.resolutionStatus,
-          resolutionNote: existing?.resolutionNote,
-        },
-      };
-    });
+    const existing = examFeedbackMap[exam.id];
+    const nextFb: Record<string, DraftExamFeedback> = {
+      ...examFeedbackMap,
+      [exam.id]: {
+        examId: exam.id,
+        className: exam.className,
+        subject: exam.subject,
+        status: 'not_ok',
+        preference,
+        note: existing?.note || '',
+        resolutionStatus: existing?.resolutionStatus,
+        resolutionNote: existing?.resolutionNote,
+      },
+    };
+    setExamFeedbackMap(nextFb);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap: nextFb,
+        dayWishes,
+        generalNote,
+        extraExamIds,
+      },
+      0
+    );
   };
 
   const setExamNote = (exam: Exam, note: string) => {
     setSubmitMessage(null);
-    setExamFeedbackMap((prev) => {
-      const existing = prev[exam.id];
-      return {
-        ...prev,
-        [exam.id]: {
-          examId: exam.id,
-          className: exam.className,
-          subject: exam.subject,
-          status: existing?.status || 'not_ok',
-          preference: existing?.preference || 'later',
-          note,
-          resolutionStatus: existing?.resolutionStatus,
-          resolutionNote: existing?.resolutionNote,
-        },
-      };
-    });
+    const existing = examFeedbackMap[exam.id];
+    const nextFb: Record<string, DraftExamFeedback> = {
+      ...examFeedbackMap,
+      [exam.id]: {
+        examId: exam.id,
+        className: exam.className,
+        subject: exam.subject,
+        status: existing?.status || 'not_ok',
+        preference: existing?.preference || 'later',
+        note,
+        resolutionStatus: existing?.resolutionStatus,
+        resolutionNote: existing?.resolutionNote,
+      },
+    };
+    setExamFeedbackMap(nextFb);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap: nextFb,
+        dayWishes,
+        generalNote,
+        extraExamIds,
+      },
+      450
+    );
   };
 
-  const markAllOpenAsOk = () => {
+  const markAllAsOk = () => {
     setSubmitMessage(null);
-    setExamFeedbackMap((prev) => {
-      const next = { ...prev };
-      for (const exam of myExams) {
-        if (!next[exam.id]) {
-          next[exam.id] = {
-            examId: exam.id,
-            className: exam.className,
-            subject: exam.subject,
-            status: 'ok',
-            preference: null,
-            note: '',
-          };
-        }
-      }
-      return next;
-    });
+    const nextFb = { ...examFeedbackMap };
+    for (const exam of myExams) {
+      nextFb[exam.id] = {
+        examId: exam.id,
+        className: exam.className,
+        subject: exam.subject,
+        status: 'ok',
+        preference: null,
+        note: '',
+        resolutionStatus: nextFb[exam.id]?.resolutionStatus,
+        resolutionNote: nextFb[exam.id]?.resolutionNote,
+      };
+    }
+    setExamFeedbackMap(nextFb);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap: nextFb,
+        dayWishes,
+        generalNote,
+        extraExamIds,
+      },
+      0
+    );
+  };
+
+  const addExtraExam = (examId: string) => {
+    if (!examId || !plan) return;
+    const nextExtra = extraExamIds.includes(examId) ? extraExamIds : [...extraExamIds, examId];
+    setExtraExamIds(nextExtra);
+    setShowExtraExamPicker(false);
+
+    const targetExam = plan.snapshot.exams.find((e) => e.id === examId);
+    let nextFb = examFeedbackMap;
+    if (targetExam && !examFeedbackMap[examId]) {
+      nextFb = {
+        ...examFeedbackMap,
+        [examId]: {
+          examId: targetExam.id,
+          className: targetExam.className,
+          subject: targetExam.subject,
+          status: 'ok',
+          preference: null,
+          note: '',
+        },
+      };
+      setExamFeedbackMap(nextFb);
+    }
+
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap: nextFb,
+        dayWishes,
+        generalNote,
+        extraExamIds: nextExtra,
+      },
+      0
+    );
   };
 
   const toggleWishDay = (weekId: string, day: DayOfWeek) => {
@@ -459,19 +738,22 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     setSubmitMessage(null);
     const scopeClass = wishClassScope === 'ALL_MY_CLASSES' ? null : wishClassScope;
 
-    setDayWishes((prev) => {
-      const existingIdx = prev.findIndex(
-        (w) => w.weekId === weekId && w.day === day && (w.className || null) === scopeClass
-      );
-      if (existingIdx >= 0) {
-        const existing = prev[existingIdx];
-        if (existing.wishType === wishMode) {
-          return prev.filter((_, i) => i !== existingIdx);
-        }
-        return prev.map((item, i) => (i === existingIdx ? { ...item, wishType: wishMode } : item));
+    const existingIdx = dayWishes.findIndex(
+      (w) => w.weekId === weekId && w.day === day && (w.className || null) === scopeClass
+    );
+    let nextWishes: DraftDayWish[];
+    if (existingIdx >= 0) {
+      const existing = dayWishes[existingIdx];
+      if (existing.wishType === wishMode) {
+        nextWishes = dayWishes.filter((_, i) => i !== existingIdx);
+      } else {
+        nextWishes = dayWishes.map((item, i) =>
+          i === existingIdx ? { ...item, wishType: wishMode } : item
+        );
       }
-      return [
-        ...prev,
+    } else {
+      nextWishes = [
+        ...dayWishes,
         {
           id: crypto.randomUUID(),
           weekId,
@@ -481,17 +763,66 @@ export function ReviewPage({ planId }: ReviewPageProps) {
           note: '',
         },
       ];
-    });
+    }
+
+    setDayWishes(nextWishes);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap,
+        dayWishes: nextWishes,
+        generalNote,
+        extraExamIds,
+      },
+      0
+    );
   };
 
   const updateWishNote = (id: string, note: string) => {
     setSubmitMessage(null);
-    setDayWishes((prev) => prev.map((w) => (w.id === id ? { ...w, note } : w)));
+    const nextWishes = dayWishes.map((w) => (w.id === id ? { ...w, note } : w));
+    setDayWishes(nextWishes);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap,
+        dayWishes: nextWishes,
+        generalNote,
+        extraExamIds,
+      },
+      450
+    );
   };
 
   const removeWish = (id: string) => {
     setSubmitMessage(null);
-    setDayWishes((prev) => prev.filter((w) => w.id !== id));
+    const nextWishes = dayWishes.filter((w) => w.id !== id);
+    setDayWishes(nextWishes);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap,
+        dayWishes: nextWishes,
+        generalNote,
+        extraExamIds,
+      },
+      0
+    );
+  };
+
+  const handleGeneralNoteChange = (note: string) => {
+    setSubmitMessage(null);
+    setGeneralNote(note);
+    queueAutoSave(
+      {
+        teacherCode: normalizedTeacherCode,
+        examFeedbackMap,
+        dayWishes,
+        generalNote: note,
+        extraExamIds,
+      },
+      450
+    );
   };
 
   const handleSubmit = async () => {
@@ -500,47 +831,23 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     setSubmitError(null);
     setSubmitMessage(null);
 
-    try {
-      const feedbackList: ReviewExamFeedback[] = myExams
-        .map((exam) => examFeedbackMap[exam.id])
-        .filter((item): item is DraftExamFeedback => Boolean(item))
-        .map((item) => ({
-          id: item.examId,
-          examId: item.examId,
-          className: item.className,
-          subject: item.subject,
-          status: item.status,
-          preference: item.preference,
-          note: item.note,
-          resolutionStatus: item.resolutionStatus || 'open',
-          resolutionNote: item.resolutionNote || '',
-        }));
+    const state = syncRef.current;
+    if (state.timerId !== null) {
+      window.clearTimeout(state.timerId);
+      state.timerId = null;
+    }
+    state.latestRevision += 1;
+    state.latestDraft = {
+      teacherCode: normalizedTeacherCode,
+      examFeedbackMap,
+      dayWishes,
+      generalNote,
+      extraExamIds,
+    };
 
-      const res = await submitColleagueFeedback(plan.id, {
-        teacherCode: normalizedTeacherCode,
-        reviewerToken,
-        generalNote,
-        examFeedback: feedbackList.map((f) => ({
-          examId: f.examId,
-          className: f.className,
-          subject: f.subject,
-          status: f.status,
-          preference: f.preference,
-          note: f.note,
-        })),
-        dayWishes: dayWishes.map((w) => ({
-          id: w.id,
-          weekId: w.weekId,
-          day: w.day,
-          className: w.className,
-          wishType: w.wishType,
-          note: w.note,
-        })),
-      });
-      hydrateFromSubmission(res.submission);
-      setSubmitMessage('Vielen Dank! Deine Rückmeldung wurde gespeichert.');
-    } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Fehler beim Speichern.');
+    try {
+      await runAutoSave();
+      setSubmitMessage('Vielen Dank! Deine Rückmeldung ist gespeichert.');
     } finally {
       setSubmitting(false);
     }
@@ -703,7 +1010,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     );
   }
 
-  // Step 2: Select Kürzel if not chosen yet
+  // Step 2: Select Name / Kürzel if not chosen yet
   if (!normalizedTeacherCode || isChangingTeacher) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
@@ -711,7 +1018,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
           className="ui-card"
           style={{
             width: '100%',
-            maxWidth: '520px',
+            maxWidth: '540px',
             padding: '1.4rem',
             boxShadow: 'var(--shadow-lg)',
           }}
@@ -732,32 +1039,32 @@ export function ReviewPage({ planId }: ReviewPageProps) {
             )}
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '1.1rem' }}>
-            Wähle dein Kürzel aus – du siehst danach direkt übersichtlich deine eigenen Klausuren.
+            Wähle deinen Namen aus – standardmäßig stehen alle deine Klausuren auf „Passt“ und jede Änderung wird sofort gespeichert.
           </p>
 
-          {allTeacherCodes.length > 0 && (
+          {allTeacherOptions.length > 0 && (
             <div style={{ marginBottom: '1.1rem' }}>
               <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
-                Kürzel im Plan:
+                Kollegium (nach Nachname sortiert):
               </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', maxHeight: '230px', overflowY: 'auto' }}>
-                {allTeacherCodes.map((code) => (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', maxHeight: '260px', overflowY: 'auto' }}>
+                {allTeacherOptions.map((opt) => (
                   <button
-                    key={code}
+                    key={opt.code}
                     type="button"
-                    onClick={() => selectTeacher(code)}
+                    onClick={() => selectTeacher(opt.code)}
                     style={{
                       padding: '0.5rem 0.85rem',
                       minHeight: '38px',
                       borderRadius: '8px',
-                      border: code === normalizedTeacherCode ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
-                      background: code === normalizedTeacherCode ? 'var(--accent-soft)' : 'var(--bg-panel)',
+                      border: opt.code === normalizedTeacherCode ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
+                      background: opt.code === normalizedTeacherCode ? 'var(--accent-soft)' : 'var(--bg-panel)',
                       color: 'var(--text-primary)',
                       fontWeight: 600,
-                      fontSize: '0.88rem',
+                      fontSize: '0.86rem',
                     }}
                   >
-                    {code}
+                    {opt.displayName}
                   </button>
                 ))}
               </div>
@@ -775,7 +1082,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               type="text"
               value={customTeacherInput}
               onChange={(e) => setCustomTeacherInput(e.target.value)}
-              placeholder="Oder Kürzel eintippen (z. B. MÜL)..."
+              placeholder="Oder Namen / Kürzel eintippen (z. B. Frank Wächter)..."
               className="ui-input"
               style={{ flex: '1 1 180px', padding: '0.65rem 0.85rem', fontSize: '16px' }}
             />
@@ -798,9 +1105,11 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     : plan.snapshot.classes;
 
   const myExamIdsSet = new Set(myExams.map((e) => e.id));
-  const answeredCount = myExams.filter((e) => Boolean(examFeedbackMap[e.id])).length;
+  const notOkCount = myExams.filter((e) => examFeedbackMap[e.id]?.status === 'not_ok').length;
+  const okCount = myExams.length - notOkCount;
   const noGoCount = dayWishes.filter((w) => w.wishType === 'no_go').length;
   const preferCount = dayWishes.filter((w) => w.wishType === 'prefer').length;
+  const activeTeacherLabel = selectedTeacherOption?.fullName || normalizedTeacherCode;
 
   return (
     <div style={{ padding: 'clamp(0.75rem, 2.5vw, 1.5rem)', width: '100%' }}>
@@ -840,7 +1149,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', marginTop: '0.3rem', fontSize: '0.84rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
               <span>
-                Kürzel: <strong style={{ color: 'var(--text-primary)' }}>{normalizedTeacherCode}</strong>
+                Lehrkraft: <strong style={{ color: 'var(--text-primary)' }}>{activeTeacherLabel}</strong>
               </span>
               <button
                 type="button"
@@ -857,10 +1166,24 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               >
                 Wechseln
               </button>
-              {savedSubmission && (
+              {autoSaveState === 'saving' ? (
+                <span style={{ color: 'var(--accent-primary)', fontSize: '0.78rem', fontWeight: 600 }}>
+                  Speichere automatisch...
+                </span>
+              ) : autoSaveState === 'error' ? (
+                <span style={{ color: 'var(--accent-danger)', fontSize: '0.78rem', fontWeight: 600 }}>
+                  Speichern fehlgeschlagen
+                </span>
+              ) : (autoSaveState === 'saved' || savedSubmission) && (
                 <span style={{ color: 'var(--accent-success)', display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem' }}>
                   <CheckCircle2 size={14} />
-                  Gespeichert ({new Date(savedSubmission.updatedAt).toLocaleDateString('de-DE')})
+                  Automatisch gespeichert
+                  {savedSubmission?.updatedAt
+                    ? ` (${new Date(savedSubmission.updatedAt).toLocaleTimeString('de-DE', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })})`
+                    : ''}
                 </span>
               )}
             </div>
@@ -920,15 +1243,17 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                 Meine Klausuren ({myExams.length})
               </h2>
               <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                {myExams.length > 0
-                  ? `${answeredCount} von ${myExams.length} bewertet`
-                  : 'Keine direkt zugeordneten Klausuren'}
+                {myExams.length === 0
+                  ? 'Keine direkt zugeordneten Klausuren'
+                  : notOkCount === 0
+                    ? `Alle ${myExams.length} Klausuren stehen standardmäßig auf „Passt“ ✓`
+                    : `${okCount}× „Passt“ · ${notOkCount}× Änderungswunsch`}
               </p>
             </div>
-            {plan.isActive && myExams.length > 0 && answeredCount < myExams.length && (
+            {plan.isActive && myExams.length > 0 && notOkCount > 0 && (
               <button
                 type="button"
-                onClick={markAllOpenAsOk}
+                onClick={markAllAsOk}
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -943,7 +1268,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                 }}
               >
                 <Check size={14} />
-                Alle offenen „Passt“
+                Alle auf „Passt“
               </button>
             )}
           </div>
@@ -960,7 +1285,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                 border: '1px solid var(--border-subtle)',
               }}
             >
-              Für <strong>{normalizedTeacherCode}</strong> sind keine Klausuren im Plan eingetragen. Falls eine fehlt, kannst du sie unten ergänzen oder über den Kalender freie/gesperrte Tage angeben.
+              Für <strong>{activeTeacherLabel}</strong> sind keine Klausuren im Plan eingetragen. Falls eine fehlt, kannst du sie unten ergänzen oder über den Kalender freie/gesperrte Tage angeben.
             </div>
           ) : (
             <>
@@ -1103,7 +1428,8 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                         const dayExams = myExamsByIsoDate.get(iso) || [];
                         const hasExams = dayExams.length > 0;
                         const hasNotOk = dayExams.some((e) => examFeedbackMap[e.id]?.status === 'not_ok');
-                        const allOk = hasExams && dayExams.every((e) => examFeedbackMap[e.id]?.status === 'ok');
+                        const allOk =
+                          hasExams && dayExams.every((e) => (examFeedbackMap[e.id]?.status ?? 'ok') === 'ok');
 
                         return (
                           <button
@@ -1192,7 +1518,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
                 {myExams.map((exam) => {
                   const fb = examFeedbackMap[exam.id];
-                  const status = fb?.status;
+                  const status: ExamFeedbackStatus = fb?.status ?? 'ok';
                   const dateParts = getExamDateParts(exam);
                   const isFocused = highlightedExamCardId === exam.id;
 
@@ -1379,6 +1705,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                             disabled={!plan.isActive}
                             value={fb?.note || ''}
                             onChange={(e) => setExamNote(exam, e.target.value)}
+                            onBlur={flushPendingSync}
                             placeholder="Hinweise (optional, z. B. Stoff fehlt)..."
                             className="ui-input"
                             style={{ fontSize: '16px', padding: '0.5rem 0.7rem' }}
@@ -1441,8 +1768,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                     defaultValue=""
                     onChange={(e) => {
                       if (!e.target.value) return;
-                      setExtraExamIds((prev) => (prev.includes(e.target.value) ? prev : [...prev, e.target.value]));
-                      setShowExtraExamPicker(false);
+                      addExtraExam(e.target.value);
                     }}
                     className="ui-input"
                     style={{ fontSize: '16px', padding: '0.5rem 0.7rem' }}
@@ -1576,7 +1902,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                     className="ui-input"
                     style={{ fontSize: '16px', padding: '0.45rem 0.65rem' }}
                   >
-                    <option value="ALL_MY_CLASSES">Gilt für alle meine Klassen ({normalizedTeacherCode})</option>
+                    <option value="ALL_MY_CLASSES">Gilt für alle meine Klassen ({activeTeacherLabel})</option>
                     {plan.snapshot.classes.map((cls) => (
                       <option key={cls.className} value={cls.className}>
                         Nur Klasse {cls.className}
@@ -1918,6 +2244,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                           disabled={!plan.isActive}
                           value={w.note}
                           onChange={(e) => updateWishNote(w.id, e.target.value)}
+                          onBlur={flushPendingSync}
                           placeholder="Hinweise (optional, z. B. Fortbildung, Ausflug)..."
                           className="ui-input"
                           style={{ fontSize: '16px', padding: '0.4rem 0.6rem' }}
@@ -1959,7 +2286,8 @@ export function ReviewPage({ planId }: ReviewPageProps) {
             <input
               type="text"
               value={generalNote}
-              onChange={(e) => setGeneralNote(e.target.value)}
+              onChange={(e) => handleGeneralNoteChange(e.target.value)}
+              onBlur={flushPendingSync}
               placeholder="Allgemeiner Hinweis an die Planung (optional)..."
               className="ui-input"
               style={{ fontSize: '16px', padding: '0.6rem 0.75rem' }}
@@ -1977,12 +2305,15 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               }}
             >
               <Send size={16} />
-              {submitting
+              {submitting || autoSaveState === 'saving'
                 ? 'Speichere...'
-                : savedSubmission
-                  ? 'Rückmeldung aktualisieren'
-                  : 'Rückmeldung absenden'}
+                : autoSaveState === 'saved'
+                  ? 'Alles automatisch gespeichert ✓'
+                  : 'Jetzt speichern'}
             </button>
+            <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
+              Alle Änderungen werden nach jedem Klick sofort automatisch hochgeladen.
+            </div>
           </section>
         )}
       </div>
@@ -2241,13 +2572,15 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                                     plan.snapshot.weeks
                                   );
                                   const fb = examFeedbackMap[exam.id];
+                                  const effectiveStatus: ExamFeedbackStatus | undefined =
+                                    fb?.status ?? (isMine ? 'ok' : undefined);
                                   const emphasize = highlightMyExams && isMine;
                                   const dimOther = highlightMyExams && !isMine;
 
                                   const mineBg =
-                                    fb?.status === 'not_ok'
+                                    effectiveStatus === 'not_ok'
                                       ? 'var(--accent-danger)'
-                                      : fb?.status === 'ok'
+                                      : effectiveStatus === 'ok'
                                         ? 'var(--accent-success)'
                                         : 'var(--accent-primary)';
 
@@ -2265,9 +2598,9 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                                             : 'var(--bg-panel)',
                                         border: emphasize
                                           ? `1.5px solid ${mineBg}`
-                                          : fb?.status === 'not_ok'
+                                          : effectiveStatus === 'not_ok'
                                             ? '1px solid var(--accent-danger)'
-                                            : fb?.status === 'ok'
+                                            : effectiveStatus === 'ok'
                                               ? '1px solid var(--accent-success)'
                                               : '1px solid var(--border-color)',
                                         opacity: dimOther ? 0.48 : 1,
@@ -2280,7 +2613,12 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                                           color: emphasize ? '#ffffff' : 'var(--text-primary)',
                                         }}
                                       >
-                                        {emphasize && (fb?.status === 'ok' ? '✓ ' : fb?.status === 'not_ok' ? '✕ ' : '★ ')}
+                                        {emphasize &&
+                                          (effectiveStatus === 'ok'
+                                            ? '✓ '
+                                            : effectiveStatus === 'not_ok'
+                                              ? '✕ '
+                                              : '★ ')}
                                         {exam.subject}
                                       </div>
                                       {teachers.length > 0 && (

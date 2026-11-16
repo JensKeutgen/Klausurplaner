@@ -617,7 +617,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
 
       const teacherCode = (body?.teacherCode || '').trim().toUpperCase();
       const reviewerToken = (body?.reviewerToken || '').trim();
-      if (!teacherCode || teacherCode.length > 32) {
+      if (!teacherCode || teacherCode.length > 64) {
         return jsonResponse(400, { error: 'Bitte ein gültiges Lehrkraft-Kürzel angeben.' }, request, env);
       }
       if (!reviewerToken || reviewerToken.length < 8) {

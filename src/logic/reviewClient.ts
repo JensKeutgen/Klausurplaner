@@ -70,8 +70,63 @@ function getClassTeacherMaps(cls: ClassSchedule) {
   return maps;
 }
 
-export function extractTeacherCodes(classes: ClassSchedule[]): string[] {
-  const set = new Set<string>();
+export interface TeacherOption {
+  code: string;
+  displayName: string;
+  fullName: string;
+  surname: string;
+}
+
+const TEACHER_TITLE_RE = /\b(Prof\.|Dr\.|Dipl\.-\w+\.?|OStR|StR|StD|OStD|Frau|Herr)\b/gi;
+
+export function extractTeacherSurname(rawName: string): string {
+  const trimmed = rawName.trim();
+  if (!trimmed) return '';
+  if (trimmed.includes(',')) {
+    return trimmed.split(',')[0].trim();
+  }
+  const cleaned = trimmed.replace(TEACHER_TITLE_RE, '').replace(/\s+/g, ' ').trim();
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : trimmed;
+}
+
+export function formatTeacherDisplayName(code: string, rawFullName?: string): string {
+  const cleanFull = (rawFullName || '').trim();
+  if (!cleanFull) return code;
+  if (cleanFull.includes(',')) {
+    return cleanFull.toUpperCase() === code ? cleanFull : `${cleanFull} (${code})`;
+  }
+  const parts = cleanFull.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    const last = parts[parts.length - 1];
+    const first = parts.slice(0, -1).join(' ');
+    const formatted = `${last}, ${first}`;
+    return cleanFull.toUpperCase() === code ? formatted : `${formatted} (${code})`;
+  }
+  return cleanFull.toUpperCase() === code ? cleanFull : `${cleanFull} (${code})`;
+}
+
+export function extractTeacherOptions(classes: ClassSchedule[]): TeacherOption[] {
+  const rawByCode = new Map<string, string>();
+  const fullNameByCode = new Map<string, string>();
+
+  const registerCode = (rawTeacher: string, cls?: ClassSchedule) => {
+    const rawTrimmed = rawTeacher.trim();
+    const norm = rawTrimmed.toUpperCase();
+    if (!norm) return;
+    if (!rawByCode.has(norm)) {
+      rawByCode.set(norm, rawTrimmed);
+    }
+    if (cls?.teacherNames) {
+      for (const [k, v] of Object.entries(cls.teacherNames)) {
+        if (k.trim().toUpperCase() === norm && v && v.trim()) {
+          fullNameByCode.set(norm, v.trim());
+          break;
+        }
+      }
+    }
+  };
+
   for (const cls of classes) {
     for (const map of getClassTeacherMaps(cls)) {
       if (!map) continue;
@@ -80,14 +135,39 @@ export function extractTeacherCodes(classes: ClassSchedule[]): string[] {
         if (!dayMap) continue;
         for (const teachers of Object.values(dayMap)) {
           for (const t of teachers || []) {
-            const norm = t.trim().toUpperCase();
-            if (norm) set.add(norm);
+            registerCode(t, cls);
           }
         }
       }
     }
+    for (const t of Object.values(cls.examTeacherBySubject || {})) {
+      if (t) registerCode(t, cls);
+    }
   }
-  return Array.from(set).sort((a, b) => a.localeCompare(b, 'de'));
+
+  const options: TeacherOption[] = [];
+  for (const [code, rawLabel] of rawByCode.entries()) {
+    const fullName = fullNameByCode.get(code) || (rawLabel !== code ? rawLabel : '');
+    const nameForSort = fullName || rawLabel;
+    const surname = extractTeacherSurname(nameForSort) || code;
+    const displayName = formatTeacherDisplayName(code, fullName || (rawLabel !== code ? rawLabel : undefined));
+    options.push({
+      code,
+      displayName,
+      fullName: fullName || rawLabel,
+      surname,
+    });
+  }
+
+  return options.sort(
+    (a, b) =>
+      a.surname.localeCompare(b.surname, 'de', { sensitivity: 'base' }) ||
+      a.displayName.localeCompare(b.displayName, 'de', { sensitivity: 'base' })
+  );
+}
+
+export function extractTeacherCodes(classes: ClassSchedule[]): string[] {
+  return extractTeacherOptions(classes).map((o) => o.code);
 }
 
 export function getExamTeachersNormalized(
