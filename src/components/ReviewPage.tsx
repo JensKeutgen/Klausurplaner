@@ -41,7 +41,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Clock,
   Lock,
   Plus,
   Send,
@@ -60,6 +59,14 @@ const GERMAN_DAY_SHORT: Record<DayOfWeek, string> = {
   Wednesday: 'Mi',
   Thursday: 'Do',
   Friday: 'Fr',
+};
+
+const GERMAN_DAY_FULL: Record<DayOfWeek, string> = {
+  Monday: 'Montag',
+  Tuesday: 'Dienstag',
+  Wednesday: 'Mittwoch',
+  Thursday: 'Donnerstag',
+  Friday: 'Freitag',
 };
 
 const DAY_ORDER: Record<DayOfWeek, number> = {
@@ -131,11 +138,16 @@ export function ReviewPage({ planId }: ReviewPageProps) {
   const [onlyMyClassesInOverview, setOnlyMyClassesInOverview] = useState(false);
   const [highlightMyExams, setHighlightMyExams] = useState(true);
 
-  // Mini month calendar state
+  // Mini month calendar states (day wish picker + exam overview calendar)
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
+  const [examCalMonth, setExamCalMonth] = useState<Date>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [highlightedExamCardId, setHighlightedExamCardId] = useState<string | null>(null);
 
   // Draft feedback state
   const [examFeedbackMap, setExamFeedbackMap] = useState<Record<string, DraftExamFeedback>>({});
@@ -224,12 +236,14 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [planId]);
 
-  // Jump mini calendar automatically to first exam week's month once plan loads
+  // Jump mini calendars automatically to first exam week's month once plan loads
   useEffect(() => {
     if (!plan || plan.snapshot.weeks.length === 0) return;
     const firstActiveWeek = plan.snapshot.weeks.find((w) => !w.isBlocked) || plan.snapshot.weeks[0];
     const monday = getWeekDayDate(firstActiveWeek, 0);
-    setCalendarMonth(new Date(monday.getFullYear(), monday.getMonth(), 1));
+    const initialMonth = new Date(monday.getFullYear(), monday.getMonth(), 1);
+    setCalendarMonth(initialMonth);
+    setExamCalMonth(initialMonth);
   }, [plan]);
 
   const handleUnlock = async (e: React.FormEvent) => {
@@ -320,17 +334,22 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     return Array.from(seen.values()).sort((a, b) => a.getTime() - b.getTime());
   }, [plan]);
 
-  // Set of ISO dates where the colleague already has an exam assigned
-  const myExamIsoDates = useMemo(() => {
+  // Map & set of ISO dates where the colleague already has exams assigned
+  const { myExamIsoDates, myExamsByIsoDate } = useMemo(() => {
     const set = new Set<string>();
-    if (!plan) return set;
+    const map = new Map<string, Exam[]>();
+    if (!plan) return { myExamIsoDates: set, myExamsByIsoDate: map };
     for (const exam of myExams) {
       if (!exam.assignedWeekId || !exam.assignedDay) continue;
       const week = plan.snapshot.weeks.find((w) => w.id === exam.assignedWeekId);
       if (!week) continue;
-      set.add(formatISODate(getWeekDayDate(week, exam.assignedDay)));
+      const iso = formatISODate(getWeekDayDate(week, exam.assignedDay));
+      set.add(iso);
+      const list = map.get(iso) || [];
+      list.push(exam);
+      map.set(iso, list);
     }
-    return set;
+    return { myExamIsoDates: set, myExamsByIsoDate: map };
   }, [plan, myExams]);
 
   const sortedDayWishes = useMemo(() => {
@@ -527,12 +546,24 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     }
   };
 
-  const formatExamDateLabel = (exam: Exam) => {
-    if (!plan || !exam.assignedWeekId || !exam.assignedDay) return 'Noch nicht terminiert';
+  const getExamDateParts = (exam: Exam) => {
+    if (!plan || !exam.assignedWeekId || !exam.assignedDay) return null;
     const week = plan.snapshot.weeks.find((w) => w.id === exam.assignedWeekId);
-    if (!week) return `${exam.assignedWeekId}`;
+    if (!week) return null;
     const d = getWeekDayDate(week, exam.assignedDay);
-    return `${GERMAN_DAY_SHORT[exam.assignedDay]}, ${formatShortDate(d)} · KW ${week.weekNumber}`;
+    return {
+      dayShort: GERMAN_DAY_SHORT[exam.assignedDay],
+      dayFull: GERMAN_DAY_FULL[exam.assignedDay],
+      shortDate: formatShortDate(d),
+      weekNumber: week.weekNumber,
+      iso: formatISODate(d),
+    };
+  };
+
+  const formatExamDateLabel = (exam: Exam) => {
+    const parts = getExamDateParts(exam);
+    if (!parts) return exam.assignedWeekId || 'Noch nicht terminiert';
+    return `${parts.dayFull}, ${parts.shortDate} · KW ${parts.weekNumber}`;
   };
 
   const formatWishDateLabel = (weekId: string, day: DayOfWeek) => {
@@ -543,10 +574,9 @@ export function ReviewPage({ planId }: ReviewPageProps) {
     return `${GERMAN_DAY_SHORT[day]}, ${formatShortDate(d)} (KW ${week.weekNumber})`;
   };
 
-  // Build rows of 7 days (Mon-Sun) with ISO KW on the left, matching ConfigSection's mini calendar
-  const calendarRows = useMemo(() => {
-    const year = calendarMonth.getFullYear();
-    const month = calendarMonth.getMonth();
+  const buildMonthRows = (monthDate: Date) => {
+    const year = monthDate.getFullYear();
+    const month = monthDate.getMonth();
     const firstDay = new Date(year, month, 1);
     const daysInMonth = new Date(year, month + 1, 0).getDate();
 
@@ -573,7 +603,16 @@ export function ReviewPage({ planId }: ReviewPageProps) {
       rows.push({ kw, cells });
     }
     return rows;
-  }, [calendarMonth]);
+  };
+
+  const calendarRows = useMemo(() => buildMonthRows(calendarMonth), [calendarMonth]);
+
+  // Compact Mon-Fri rows for the "Meine Klausuren" overview calendar
+  const examCalendarRows = useMemo(() => {
+    return buildMonthRows(examCalMonth)
+      .map((r) => ({ kw: r.kw, cells: r.cells.slice(0, 5) }))
+      .filter((r) => r.cells.some((c) => c !== null));
+  }, [examCalMonth]);
 
   if (loading) {
     return (
@@ -924,159 +963,428 @@ export function ReviewPage({ planId }: ReviewPageProps) {
               Für <strong>{normalizedTeacherCode}</strong> sind keine Klausuren im Plan eingetragen. Falls eine fehlt, kannst du sie unten ergänzen oder über den Kalender freie/gesperrte Tage angeben.
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-              {myExams.map((exam) => {
-                const fb = examFeedbackMap[exam.id];
-                const status = fb?.status;
-                return (
-                  <div
-                    key={exam.id}
-                    style={{
-                      padding: '0.85rem',
-                      borderRadius: '10px',
-                      background: 'var(--bg-panel)',
-                      border:
-                        status === 'not_ok'
-                          ? '1.5px solid var(--accent-danger)'
-                          : status === 'ok'
-                            ? '1.5px solid var(--accent-success)'
-                            : '1px solid var(--border-subtle)',
-                    }}
-                  >
+            <>
+              {/* Compact Mon-Fri Overview Calendar showing own exam dates at a glance */}
+              <div
+                style={{
+                  marginBottom: '1rem',
+                  padding: '0.75rem',
+                  borderRadius: '10px',
+                  background: 'var(--bg-panel)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '0.4rem',
+                    marginBottom: '0.55rem',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                    <Calendar size={15} color="var(--accent-primary)" />
+                    <span>Deine Termine im Kalender</span>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <button
+                      type="button"
+                      className="ui-btn"
+                      style={{ padding: '4px', minWidth: '28px', minHeight: '28px' }}
+                      onClick={() =>
+                        setExamCalMonth(new Date(examCalMonth.getFullYear(), examCalMonth.getMonth() - 1, 1))
+                      }
+                      title="Vorheriger Monat"
+                    >
+                      <ChevronLeft size={14} />
+                    </button>
+                    <span style={{ fontSize: '0.82rem', fontWeight: 700, minWidth: '108px', textAlign: 'center' }}>
+                      {examCalMonth.toLocaleString('de-DE', { month: 'long', year: 'numeric' })}
+                    </span>
+                    <button
+                      type="button"
+                      className="ui-btn"
+                      style={{ padding: '4px', minWidth: '28px', minHeight: '28px' }}
+                      onClick={() =>
+                        setExamCalMonth(new Date(examCalMonth.getFullYear(), examCalMonth.getMonth() + 1, 1))
+                      }
+                      title="Nächster Monat"
+                    >
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                {planMonths.length > 1 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginBottom: '0.5rem' }}>
+                    {planMonths.map((pm) => {
+                      const active =
+                        pm.getFullYear() === examCalMonth.getFullYear() &&
+                        pm.getMonth() === examCalMonth.getMonth();
+                      return (
+                        <button
+                          key={`ex-${pm.getFullYear()}-${pm.getMonth()}`}
+                          type="button"
+                          onClick={() => setExamCalMonth(pm)}
+                          style={{
+                            padding: '2px 8px',
+                            borderRadius: '999px',
+                            fontSize: '0.72rem',
+                            fontWeight: 600,
+                            border: active ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
+                            background: active ? 'var(--accent-primary)' : 'var(--bg-surface)',
+                            color: active ? 'white' : 'var(--text-secondary)',
+                          }}
+                        >
+                          {pm.toLocaleString('de-DE', { month: 'short', year: '2-digit' })}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '28px repeat(5, 1fr)',
+                    gap: '4px',
+                    textAlign: 'center',
+                    fontSize: '0.7rem',
+                    fontWeight: 600,
+                    color: 'var(--text-muted)',
+                    marginBottom: '4px',
+                  }}
+                >
+                  <div>KW</div>
+                  <div>Mo</div>
+                  <div>Di</div>
+                  <div>Mi</div>
+                  <div>Do</div>
+                  <div>Fr</div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  {examCalendarRows.map((row, rIdx) => (
                     <div
+                      key={`ex-row-${examCalMonth.getFullYear()}-${examCalMonth.getMonth()}-r${rIdx}`}
                       style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: '0.75rem',
-                        flexWrap: 'wrap',
+                        display: 'grid',
+                        gridTemplateColumns: '28px repeat(5, 1fr)',
+                        gap: '4px',
+                        alignItems: 'stretch',
                       }}
                     >
-                      <div style={{ minWidth: 0, flex: '1 1 180px' }}>
-                        <div style={{ fontWeight: 700, fontSize: '0.96rem', color: 'var(--text-primary)' }}>
-                          {exam.className} · {exam.subject}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: '0.82rem',
-                            color: 'var(--text-secondary)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '5px',
-                            marginTop: '3px',
-                          }}
-                        >
-                          <Clock size={13} style={{ flexShrink: 0 }} />
-                          <span>{formatExamDateLabel(exam)}</span>
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'flex', gap: '0.45rem', flex: '1 1 210px', justifyContent: 'flex-end' }}>
-                        <button
-                          type="button"
-                          disabled={!plan.isActive}
-                          onClick={() => setExamStatus(exam, 'ok')}
-                          style={{
-                            flex: 1,
-                            minHeight: '40px',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '5px',
-                            padding: '0.45rem 0.75rem',
-                            borderRadius: '8px',
-                            fontWeight: 600,
-                            fontSize: '0.86rem',
-                            border: status === 'ok' ? '1px solid var(--accent-success)' : '1px solid var(--border-color)',
-                            background: status === 'ok' ? 'var(--accent-success)' : 'var(--bg-surface)',
-                            color: status === 'ok' ? 'white' : 'var(--text-primary)',
-                          }}
-                        >
-                          <Check size={15} />
-                          Passt
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={!plan.isActive}
-                          onClick={() => setExamStatus(exam, 'not_ok')}
-                          style={{
-                            flex: 1,
-                            minHeight: '40px',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '5px',
-                            padding: '0.45rem 0.75rem',
-                            borderRadius: '8px',
-                            fontWeight: 600,
-                            fontSize: '0.86rem',
-                            border: status === 'not_ok' ? '1px solid var(--accent-danger)' : '1px solid var(--border-color)',
-                            background: status === 'not_ok' ? 'var(--accent-danger)' : 'var(--bg-surface)',
-                            color: status === 'not_ok' ? 'white' : 'var(--text-primary)',
-                          }}
-                        >
-                          <X size={15} />
-                          Passt nicht
-                        </button>
-                      </div>
-                    </div>
-
-                    {status === 'not_ok' && (
                       <div
                         style={{
-                          marginTop: '0.75rem',
-                          paddingTop: '0.75rem',
-                          borderTop: '1px solid var(--border-subtle)',
+                          fontSize: '0.66rem',
+                          fontWeight: 700,
+                          fontFamily: 'monospace',
+                          color: 'var(--accent-primary)',
+                          background: 'var(--accent-soft)',
+                          borderRadius: '5px',
                           display: 'flex',
-                          flexDirection: 'column',
-                          gap: '0.55rem',
+                          alignItems: 'center',
+                          justifyContent: 'center',
                         }}
+                        title={`Kalenderwoche ${row.kw}`}
                       >
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-                          {(
-                            [
-                              { key: 'earlier', label: '← Lieber früher' },
-                              { key: 'later', label: '→ Lieber später' },
-                              { key: 'not_this_day', label: 'Nur dieser Tag geht nicht' },
-                            ] as const
-                          ).map((opt) => {
-                            const active = fb?.preference === opt.key;
-                            return (
-                              <button
-                                key={opt.key}
-                                type="button"
-                                disabled={!plan.isActive}
-                                onClick={() => setExamPreference(exam, opt.key)}
+                        {row.kw}
+                      </div>
+
+                      {row.cells.map((date, cIdx) => {
+                        if (!date) return <div key={`ex-e-${cIdx}`} />;
+                        const iso = formatISODate(date);
+                        const slot = dateSlotMap.get(iso);
+                        const inPlan = Boolean(slot);
+                        const isBlocked = Boolean(slot?.isGlobalBlocked);
+                        const dayExams = myExamsByIsoDate.get(iso) || [];
+                        const hasExams = dayExams.length > 0;
+                        const hasNotOk = dayExams.some((e) => examFeedbackMap[e.id]?.status === 'not_ok');
+                        const allOk = hasExams && dayExams.every((e) => examFeedbackMap[e.id]?.status === 'ok');
+
+                        return (
+                          <button
+                            key={date.getDate()}
+                            type="button"
+                            disabled={!hasExams}
+                            onClick={() => {
+                              if (!hasExams) return;
+                              const first = dayExams[0];
+                              setHighlightedExamCardId(first.id);
+                              document
+                                .getElementById(`my-exam-${first.id}`)
+                                ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }}
+                            style={{
+                              minHeight: '42px',
+                              padding: '3px 2px',
+                              borderRadius: '6px',
+                              border: hasExams
+                                ? hasNotOk
+                                  ? '1.5px solid var(--accent-danger)'
+                                  : allOk
+                                    ? '1.5px solid var(--accent-success)'
+                                    : '1.5px solid var(--accent-primary)'
+                                : '1px solid var(--border-subtle)',
+                              background: hasExams
+                                ? hasNotOk
+                                  ? 'var(--accent-danger)'
+                                  : allOk
+                                    ? 'var(--accent-success)'
+                                    : 'var(--accent-primary)'
+                                : isBlocked
+                                  ? 'var(--bg-app)'
+                                  : 'var(--bg-surface)',
+                              color: hasExams
+                                ? '#ffffff'
+                                : !inPlan || isBlocked
+                                  ? 'var(--text-muted)'
+                                  : 'var(--text-primary)',
+                              opacity: !inPlan ? 0.4 : isBlocked && !hasExams ? 0.55 : 1,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'flex-start',
+                              gap: '2px',
+                              cursor: hasExams ? 'pointer' : 'default',
+                              overflow: 'hidden',
+                            }}
+                            title={
+                              hasExams
+                                ? dayExams.map((e) => `${e.className} ${e.subject}`).join(', ')
+                                : isBlocked
+                                  ? 'Ferien / gesperrt'
+                                  : undefined
+                            }
+                          >
+                            <span style={{ fontSize: '0.76rem', fontWeight: hasExams ? 800 : 500, lineHeight: 1.1 }}>
+                              {date.getDate()}.
+                            </span>
+                            {hasExams && (
+                              <span
                                 style={{
-                                  flex: '1 1 auto',
-                                  minHeight: '36px',
-                                  padding: '0.35rem 0.65rem',
-                                  borderRadius: '8px',
-                                  fontSize: '0.8rem',
-                                  fontWeight: 600,
-                                  border: active ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
-                                  background: active ? 'var(--accent-soft)' : 'var(--bg-surface)',
-                                  color: active ? 'var(--accent-primary)' : 'var(--text-primary)',
+                                  fontSize: '0.63rem',
+                                  fontWeight: 700,
+                                  lineHeight: 1.05,
+                                  maxWidth: '100%',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                  padding: '0 2px',
                                 }}
                               >
-                                {opt.label}
-                              </button>
-                            );
-                          })}
+                                {dayExams.length === 1
+                                  ? `${dayExams[0].className} ${dayExams[0].subject.slice(0, 3)}`
+                                  : `${dayExams.length} Klaus.`}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                {myExams.map((exam) => {
+                  const fb = examFeedbackMap[exam.id];
+                  const status = fb?.status;
+                  const dateParts = getExamDateParts(exam);
+                  const isFocused = highlightedExamCardId === exam.id;
+
+                  const accentColor =
+                    status === 'not_ok'
+                      ? 'var(--accent-danger)'
+                      : status === 'ok'
+                        ? 'var(--accent-success)'
+                        : 'var(--accent-primary)';
+
+                  return (
+                    <div
+                      key={exam.id}
+                      id={`my-exam-${exam.id}`}
+                      style={{
+                        padding: '0.85rem',
+                        borderRadius: '10px',
+                        background: 'var(--bg-panel)',
+                        border:
+                          status === 'not_ok'
+                            ? '1.5px solid var(--accent-danger)'
+                            : status === 'ok'
+                              ? '1.5px solid var(--accent-success)'
+                              : isFocused
+                                ? '2px solid var(--accent-primary)'
+                                : '1px solid var(--border-subtle)',
+                        boxShadow: isFocused ? '0 0 0 3px var(--accent-soft)' : undefined,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: '0.75rem',
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        {/* Prominent Date Tile + Day/Date in Focus */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0, flex: '1 1 200px' }}>
+                          <div
+                            style={{
+                              width: '62px',
+                              flexShrink: 0,
+                              borderRadius: '8px',
+                              overflow: 'hidden',
+                              border: `1.5px solid ${accentColor}`,
+                              background: 'var(--bg-surface)',
+                              textAlign: 'center',
+                            }}
+                          >
+                            <div
+                              style={{
+                                background: accentColor,
+                                color: '#ffffff',
+                                fontSize: '0.68rem',
+                                fontWeight: 800,
+                                textTransform: 'uppercase',
+                                padding: '2px 0',
+                                letterSpacing: '0.04em',
+                              }}
+                            >
+                              {dateParts ? dateParts.dayShort : '—'}
+                            </div>
+                            <div style={{ padding: '4px 2px' }}>
+                              <div style={{ fontSize: '0.96rem', fontWeight: 800, color: 'var(--text-primary)', lineHeight: 1.15 }}>
+                                {dateParts ? dateParts.shortDate : 'Offen'}
+                              </div>
+                              {dateParts && (
+                                <div style={{ fontSize: '0.65rem', fontWeight: 600, color: 'var(--text-muted)', marginTop: '1px' }}>
+                                  KW {dateParts.weekNumber}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 800, fontSize: '1rem', color: 'var(--text-primary)', lineHeight: 1.25 }}>
+                              {dateParts ? `${dateParts.dayFull}, ${dateParts.shortDate}` : 'Noch nicht terminiert'}
+                            </div>
+                            <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                              {exam.className} · {exam.subject}
+                            </div>
+                          </div>
                         </div>
 
-                        <input
-                          type="text"
-                          disabled={!plan.isActive}
-                          value={fb?.note || ''}
-                          onChange={(e) => setExamNote(exam, e.target.value)}
-                          placeholder="Kurzer Grund (optional, z. B. Stoff fehlt)..."
-                          className="ui-input"
-                          style={{ fontSize: '16px', padding: '0.5rem 0.7rem' }}
-                        />
+                        <div style={{ display: 'flex', gap: '0.45rem', flex: '1 1 210px', justifyContent: 'flex-end' }}>
+                          <button
+                            type="button"
+                            disabled={!plan.isActive}
+                            onClick={() => setExamStatus(exam, 'ok')}
+                            style={{
+                              flex: 1,
+                              minHeight: '42px',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '5px',
+                              padding: '0.45rem 0.75rem',
+                              borderRadius: '8px',
+                              fontWeight: 600,
+                              fontSize: '0.88rem',
+                              border: status === 'ok' ? '1px solid var(--accent-success)' : '1px solid var(--border-color)',
+                              background: status === 'ok' ? 'var(--accent-success)' : 'var(--bg-surface)',
+                              color: status === 'ok' ? 'white' : 'var(--text-primary)',
+                            }}
+                          >
+                            <Check size={15} />
+                            Passt
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={!plan.isActive}
+                            onClick={() => setExamStatus(exam, 'not_ok')}
+                            style={{
+                              flex: 1,
+                              minHeight: '42px',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '5px',
+                              padding: '0.45rem 0.75rem',
+                              borderRadius: '8px',
+                              fontWeight: 600,
+                              fontSize: '0.88rem',
+                              border: status === 'not_ok' ? '1px solid var(--accent-danger)' : '1px solid var(--border-color)',
+                              background: status === 'not_ok' ? 'var(--accent-danger)' : 'var(--bg-surface)',
+                              color: status === 'not_ok' ? 'white' : 'var(--text-primary)',
+                            }}
+                          >
+                            <X size={15} />
+                            Passt nicht
+                          </button>
+                        </div>
                       </div>
-                    )}
+
+                      {status === 'not_ok' && (
+                        <div
+                          style={{
+                            marginTop: '0.75rem',
+                            paddingTop: '0.75rem',
+                            borderTop: '1px solid var(--border-subtle)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.55rem',
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+                            {(
+                              [
+                                { key: 'earlier', label: '← Lieber früher' },
+                                { key: 'later', label: '→ Lieber später' },
+                                { key: 'not_this_day', label: 'Nur dieser Tag geht nicht' },
+                              ] as const
+                            ).map((opt) => {
+                              const active = fb?.preference === opt.key;
+                              return (
+                                <button
+                                  key={opt.key}
+                                  type="button"
+                                  disabled={!plan.isActive}
+                                  onClick={() => setExamPreference(exam, opt.key)}
+                                  style={{
+                                    flex: '1 1 auto',
+                                    minHeight: '36px',
+                                    padding: '0.35rem 0.65rem',
+                                    borderRadius: '8px',
+                                    fontSize: '0.8rem',
+                                    fontWeight: 600,
+                                    border: active ? '1px solid var(--accent-primary)' : '1px solid var(--border-color)',
+                                    background: active ? 'var(--accent-soft)' : 'var(--bg-surface)',
+                                    color: active ? 'var(--accent-primary)' : 'var(--text-primary)',
+                                  }}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          <input
+                            type="text"
+                            disabled={!plan.isActive}
+                            value={fb?.note || ''}
+                            onChange={(e) => setExamNote(exam, e.target.value)}
+                            placeholder="Hinweise (optional, z. B. Stoff fehlt)..."
+                            className="ui-input"
+                            style={{ fontSize: '16px', padding: '0.5rem 0.7rem' }}
+                          />
+                        </div>
+                      )}
 
                     {fb?.resolutionStatus && fb.resolutionStatus !== 'open' && (
                       <div
@@ -1104,6 +1412,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                 );
               })}
             </div>
+            </>
           )}
 
           {plan.isActive && otherExams.length > 0 && (
@@ -1609,7 +1918,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                           disabled={!plan.isActive}
                           value={w.note}
                           onChange={(e) => updateWishNote(w.id, e.target.value)}
-                          placeholder="Grund (optional, z. B. Fortbildung, Ausflug)..."
+                          placeholder="Hinweise (optional, z. B. Fortbildung, Ausflug)..."
                           className="ui-input"
                           style={{ fontSize: '16px', padding: '0.4rem 0.6rem' }}
                         />
@@ -1869,6 +2178,7 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                   {/* Rows */}
                   {overviewClasses.map((cls, cIdx) => {
                     const row = 3 + cIdx;
+                    const isMyClass = myClasses.includes(cls.className);
                     return (
                       <div key={cls.className} style={{ display: 'contents' }}>
                         <div
@@ -1878,12 +2188,14 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                             position: 'sticky',
                             left: 0,
                             zIndex: 5,
-                            background: 'var(--bg-panel)',
+                            background: highlightMyExams && isMyClass ? 'var(--accent-soft)' : 'var(--bg-panel)',
+                            borderLeft: highlightMyExams && isMyClass ? '4px solid var(--accent-primary)' : 'none',
                             borderRight: '1px solid var(--border-color)',
                             borderBottom: '1px solid var(--border-color)',
                             padding: '0.45rem 0.6rem',
-                            fontWeight: 600,
+                            fontWeight: highlightMyExams && isMyClass ? 700 : 600,
                             fontSize: '0.8rem',
+                            color: highlightMyExams && isMyClass ? 'var(--accent-primary)' : 'var(--text-primary)',
                             display: 'flex',
                             alignItems: 'center',
                           }}
@@ -1929,30 +2241,56 @@ export function ReviewPage({ planId }: ReviewPageProps) {
                                     plan.snapshot.weeks
                                   );
                                   const fb = examFeedbackMap[exam.id];
+                                  const emphasize = highlightMyExams && isMine;
+                                  const dimOther = highlightMyExams && !isMine;
+
+                                  const mineBg =
+                                    fb?.status === 'not_ok'
+                                      ? 'var(--accent-danger)'
+                                      : fb?.status === 'ok'
+                                        ? 'var(--accent-success)'
+                                        : 'var(--accent-primary)';
+
                                   return (
                                     <div
                                       key={exam.id}
                                       style={{
-                                        padding: '3px 5px',
-                                        borderRadius: '4px',
-                                        fontSize: '0.72rem',
-                                        background:
-                                          highlightMyExams && isMine
-                                            ? 'var(--accent-soft)'
+                                        padding: emphasize ? '4px 6px' : '3px 5px',
+                                        borderRadius: '5px',
+                                        fontSize: '0.73rem',
+                                        background: emphasize
+                                          ? mineBg
+                                          : dimOther
+                                            ? 'var(--bg-app)'
                                             : 'var(--bg-panel)',
-                                        border:
-                                          fb?.status === 'not_ok'
+                                        border: emphasize
+                                          ? `1.5px solid ${mineBg}`
+                                          : fb?.status === 'not_ok'
                                             ? '1px solid var(--accent-danger)'
                                             : fb?.status === 'ok'
                                               ? '1px solid var(--accent-success)'
-                                              : highlightMyExams && isMine
-                                                ? '1px solid var(--accent-primary)'
-                                                : '1px solid var(--border-color)',
+                                              : '1px solid var(--border-color)',
+                                        opacity: dimOther ? 0.48 : 1,
+                                        boxShadow: emphasize ? '0 2px 6px rgba(37, 99, 235, 0.32)' : undefined,
                                       }}
                                     >
-                                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{exam.subject}</div>
+                                      <div
+                                        style={{
+                                          fontWeight: emphasize ? 800 : 600,
+                                          color: emphasize ? '#ffffff' : 'var(--text-primary)',
+                                        }}
+                                      >
+                                        {emphasize && (fb?.status === 'ok' ? '✓ ' : fb?.status === 'not_ok' ? '✕ ' : '★ ')}
+                                        {exam.subject}
+                                      </div>
                                       {teachers.length > 0 && (
-                                        <div style={{ fontSize: '0.66rem', color: 'var(--text-secondary)' }}>
+                                        <div
+                                          style={{
+                                            fontSize: '0.66rem',
+                                            color: emphasize ? 'rgba(255, 255, 255, 0.9)' : 'var(--text-secondary)',
+                                            fontWeight: emphasize ? 600 : 400,
+                                          }}
+                                        >
                                           {teachers.join(', ')}
                                         </div>
                                       )}
