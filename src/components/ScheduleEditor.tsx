@@ -3,6 +3,7 @@ import { Trash2, Calendar, ChevronDown, ChevronRight, ChevronUp } from 'lucide-r
 import { type ClassSchedule, DAYS_OF_WEEK, type DayOfWeek } from '../types';
 import { DndContext, useDraggable, useDroppable, DragOverlay, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
+import { getEffectiveGradeLevel } from '../logic/solver';
 
 interface ScheduleEditorProps {
     classes: ClassSchedule[];
@@ -33,7 +34,7 @@ function DraggableSubject({ id, children, onDelete }: { id: string, children: Re
             >
                 <span>{children}</span>
                 <button
-                    onPointerDown={(e) => { e.stopPropagation(); onDelete(); }} // Use onPointerDown to prevent drag start
+                    onPointerDown={(e) => { e.stopPropagation(); onDelete(); }}
                     style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '2px', display: 'flex' }}
                     className="hover-danger"
                     title="Fach von diesem Tag entfernen"
@@ -55,9 +56,9 @@ function DroppableDay({ id, children, isOverProp }: { id: string, children: Reac
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '6px',
-                minHeight: '30px', // Ensure drop target has height even if empty
+                minHeight: '30px',
                 background: isOver || isOverProp ? 'var(--bg-panel)' : 'transparent',
-                borderRadius: '44px',
+                borderRadius: '8px',
                 transition: 'background 0.2s',
                 padding: '4px'
             }}
@@ -69,7 +70,6 @@ function DroppableDay({ id, children, isOverProp }: { id: string, children: Reac
 
 export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }: ScheduleEditorProps) {
     const [expandedClass, setExpandedClass] = React.useState<string | null>(null);
-
     const [activeSubjectName, setActiveSubjectName] = React.useState<string | null>(null);
 
     const toggleExpand = (className: string) => {
@@ -101,10 +101,6 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
     };
 
     const handleDragStart = (event: DragStartEvent) => {
-
-        // ID format: subject::{className}::{weekType}::{day}::{index}::{subjectName}
-        // Actually, we can just pass the subject name in separate state or extract it from ID if we encode it.
-        // Let's encode it at the end.
         const parts = (event.active.id as string).split('::');
         if (parts.length >= 6) {
             setActiveSubjectName(parts[5]);
@@ -113,29 +109,20 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
 
     const handleDragEnd = (event: DragEndEvent) => {
         const { active, over } = event;
-
         setActiveSubjectName(null);
-
         if (!over) return;
 
-        const activeIdStr = active.id as string;
-        const overIdStr = over.id as string;
-
-        // active: subject::{className}::{weekType}::{day}::{index}::{subjectName}
-        // over: day::{className}::{weekType}::{day}
-
-        const activeParts = activeIdStr.split('::');
-        const overParts = overIdStr.split('::');
+        const activeParts = (active.id as string).split('::');
+        const overParts = (over.id as string).split('::');
 
         if (activeParts.length < 5 || overParts.length < 4) return;
 
-        const [_, srcClass, srcWeekType, srcDay, srcIndexStr] = activeParts;
-        const [__, destClass, destWeekType, destDay] = overParts;
+        const [, srcClass, srcWeekType, srcDay, srcIndexStr] = activeParts;
+        const [, destClass, destWeekType, destDay] = overParts;
 
-        if (srcClass !== destClass) return; // Prevent cross-class dragging for now
-        if (srcWeekType !== destWeekType) return; // Prevent cross-week dragging for now
-
-        if (srcDay === destDay) return; // Dropped on same day
+        if (srcClass !== destClass) return;
+        if (srcWeekType !== destWeekType) return;
+        if (srcDay === destDay) return;
 
         const cls = classes.find(c => c.className === srcClass);
         if (!cls) return;
@@ -148,13 +135,11 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
             ? { ...newCls.subjects }
             : { ...(newCls.subjectsB || {}) };
 
-        // Remove from source
         const sourceList = [...(subjectsMap[srcDay as DayOfWeek] || [])];
         const subject = sourceList[srcIndex];
         sourceList.splice(srcIndex, 1);
         subjectsMap[srcDay as DayOfWeek] = sourceList;
 
-        // Add to dest
         const destList = [...(subjectsMap[destDay as DayOfWeek] || [])];
         destList.push(subject);
         subjectsMap[destDay as DayOfWeek] = destList;
@@ -184,21 +169,29 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
                                 {day.replace('Monday', 'Montag').replace('Tuesday', 'Dienstag').replace('Wednesday', 'Mittwoch').replace('Thursday', 'Donnerstag').replace('Friday', 'Freitag').slice(0, 2)}
                             </div>
 
-                            <DroppableDay
-                                id={`day::${cls.className}::${weekType}::${day}`}
-                            >
+                            <DroppableDay id={`day::${cls.className}::${weekType}::${day}`}>
                                 {(subjectsMap[day] || []).length === 0 && (
                                     <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontStyle: 'italic', pointerEvents: 'none' }}>-</span>
                                 )}
-                                {subjectsMap[day]?.map((subject, idx) => (
-                                    <DraggableSubject
-                                        key={`${weekType}-${day}-${idx}`}
-                                        id={`subject::${cls.className}::${weekType}::${day}::${idx}::${subject}`}
-                                        onDelete={() => removeSubject(cls.className, day, idx, weekType)}
-                                    >
-                                        {subject}
-                                    </DraggableSubject>
-                                ))}
+                                {subjectsMap[day]?.map((subject, idx) => {
+                                    const teachers = (weekType === 'B' ? cls.subjectTeachersB : cls.subjectTeachers)?.[day]?.[subject];
+                                    return (
+                                        <DraggableSubject
+                                            key={`${weekType}-${day}-${idx}`}
+                                            id={`subject::${cls.className}::${weekType}::${day}::${idx}::${subject}`}
+                                            onDelete={() => removeSubject(cls.className, day, idx, weekType)}
+                                        >
+                                            <span>
+                                                {subject}
+                                                {teachers && teachers.length > 0 && (
+                                                    <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginLeft: '6px' }}>
+                                                        ({teachers.join(',')})
+                                                    </span>
+                                                )}
+                                            </span>
+                                        </DraggableSubject>
+                                    );
+                                })}
                             </DroppableDay>
                         </div>
                     ))}
@@ -216,7 +209,7 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
                 >
                     <h2 style={{ fontSize: '1.25rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                         <Calendar size={24} style={{ color: 'var(--accent-primary)' }} />
-                        Stundenpläne prüfen
+                        Stundenpläne & Stufen prüfen
                     </h2>
                     <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)' }}>
                         {isCollapsed ? <ChevronDown size={20} /> : <ChevronUp size={20} />}
@@ -226,30 +219,53 @@ export function ScheduleEditor({ classes, onUpdateClass, isCollapsed, onToggle }
                 {!isCollapsed && (
                     <>
                         <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem', fontSize: '0.9rem' }}>
-                            Überprüfe die detaillierten Wochenpläne. Du kannst Fächer per Drag & Drop verschieben oder mit dem Mülleimer-Icon entfernen.
+                            Überprüfe die Wochenpläne und die automatisch erkannte <strong>Stufe</strong> (für gemeinsame Klausurwochen pro Fach).
                         </p>
 
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                             {classes.map(cls => {
                                 const isExpanded = expandedClass === cls.className;
+                                const effectiveGrade = getEffectiveGradeLevel(cls, cls.className);
                                 return (
                                     <div key={cls.className} style={{ border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
-                                        <button
+                                        <div
                                             onClick={(e) => { e.stopPropagation(); toggleExpand(cls.className); }}
                                             style={{
                                                 width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                                padding: '1rem', background: 'var(--bg-panel)', border: 'none',
-                                                color: 'var(--text-primary)', fontWeight: 600, cursor: 'pointer'
+                                                padding: '0.85rem 1rem', background: 'var(--bg-panel)',
+                                                color: 'var(--text-primary)', fontWeight: 600, cursor: 'pointer', gap: '0.75rem'
                                             }}
                                         >
                                             <span>{cls.className}</span>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                <div
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem', color: 'var(--text-secondary)' }}
+                                                >
+                                                    <span>Stufe:</span>
+                                                    <input
+                                                        type="text"
+                                                        value={cls.gradeLevel ?? effectiveGrade}
+                                                        onChange={(e) => onUpdateClass({ ...cls, gradeLevel: e.target.value })}
+                                                        title="Stufe für gemeinsame Wochen-Gruppierung bearbeiten"
+                                                        style={{
+                                                            width: '68px',
+                                                            padding: '2px 6px',
+                                                            borderRadius: '4px',
+                                                            border: '1px solid var(--border-color)',
+                                                            background: 'var(--bg-app)',
+                                                            color: 'var(--text-primary)',
+                                                            fontSize: '0.78rem',
+                                                            textAlign: 'center',
+                                                        }}
+                                                    />
+                                                </div>
                                                 {cls.subjectsB && (
-                                                    <span style={{ fontSize: '0.75rem', background: 'var(--accent-secondary)', color: 'white', padding: '2px 6px', borderRadius: '4px' }}>A/B Woche</span>
+                                                    <span style={{ fontSize: '0.75rem', background: '#8b5cf6', color: 'white', padding: '2px 6px', borderRadius: '4px' }}>A/B Woche</span>
                                                 )}
                                                 {isExpanded ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
                                             </div>
-                                        </button>
+                                        </div>
 
                                         {isExpanded && (
                                             <div style={{ padding: '1rem', overflowX: 'auto' }}>

@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local EduPage bridge data, saved credentials & Python venv
+.venv/
+server/data/
+__pycache__/
+*.pyc
+

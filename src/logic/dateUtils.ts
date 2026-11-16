@@ -1,46 +1,107 @@
-import type { Week } from '../types';
-import { v4 as uuidv4 } from 'uuid';
+import type { DayOfWeek, Week } from '../types';
 
-export function getISOWeek(date: Date): number {
+export function formatWeekId(year: number, weekNumber: number): string {
+    return `${year}-KW${String(weekNumber).padStart(2, '0')}`;
+}
+
+export function getISOWeekAndYear(date: Date): { weekNumber: number; year: number } {
     const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
     const dayNum = d.getUTCDay() || 7;
     d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-    return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    const isoYear = d.getUTCFullYear();
+    const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+    const weekNumber = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    return { weekNumber, year: isoYear };
 }
 
-export function getWeeksBetween(start: Date, end: Date): Week[] {
+export function getISOWeek(date: Date): number {
+    return getISOWeekAndYear(date).weekNumber;
+}
+
+/**
+ * Returns a local Date representing Monday of the given ISO week & year.
+ */
+export function getDateOfIsoWeek(weekNumber: number, year: number): Date {
+    // Jan 4 is always in ISO week 1
+    const jan4 = new Date(Date.UTC(year, 0, 4));
+    const jan4Day = jan4.getUTCDay() || 7; // 1=Mon..7=Sun
+    const mondayWeek1UTC = new Date(jan4);
+    mondayWeek1UTC.setUTCDate(jan4.getUTCDate() - jan4Day + 1);
+    const targetUTC = new Date(mondayWeek1UTC);
+    targetUTC.setUTCDate(mondayWeek1UTC.getUTCDate() + (weekNumber - 1) * 7);
+    return new Date(targetUTC.getUTCFullYear(), targetUTC.getUTCMonth(), targetUTC.getUTCDate());
+}
+
+const DAY_INDEX_MAP: Record<DayOfWeek, number> = {
+    Monday: 0,
+    Tuesday: 1,
+    Wednesday: 2,
+    Thursday: 3,
+    Friday: 4,
+};
+
+export function getWeekDayDate(week: Pick<Week, 'weekNumber' | 'year'>, day: DayOfWeek | number): Date {
+    const offset = typeof day === 'number' ? day : DAY_INDEX_MAP[day];
+    const monday = getDateOfIsoWeek(week.weekNumber, week.year);
+    const result = new Date(monday);
+    result.setDate(monday.getDate() + offset);
+    return result;
+}
+
+export function formatShortDate(date: Date): string {
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    return `${day}.${month}.`;
+}
+
+export function formatISODate(date: Date): string {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+export function getWeekDateRangeString(week: Pick<Week, 'weekNumber' | 'year'>): string {
+    const mon = getWeekDayDate(week, 0);
+    const fri = getWeekDayDate(week, 4);
+    return `${formatShortDate(mon)}–${formatShortDate(fri)}`;
+}
+
+export function getWeeksBetween(start: Date, end: Date, existingWeeks: Week[] = []): Week[] {
     const weeks: Week[] = [];
-    const current = new Date(start);
+    const current = new Date(start.getFullYear(), start.getMonth(), start.getDate());
 
-    // Align to start of week (Monday)
+    // Align to Monday of start week
     const day = current.getDay() || 7;
-    if (day !== 1) current.setHours(-24 * (day - 1));
+    if (day !== 1) {
+        current.setDate(current.getDate() - (day - 1));
+    }
 
+    const endNormalized = new Date(end.getFullYear(), end.getMonth(), end.getDate());
     const distinctWeeks = new Set<string>();
 
-    while (current <= end) {
-        const weekNum = getISOWeek(current);
+    // Map existing weeks by year-weekNumber to preserve isBlocked & weekType
+    const existingByKey = new Map<string, Week>();
+    for (const w of existingWeeks) {
+        existingByKey.set(`${w.year}-${w.weekNumber}`, w);
+    }
 
-        // Better ISO year logic:
-        const d = new Date(current);
-        d.setDate(d.getDate() + 3);
-        const isoYear = d.getFullYear();
-
-        const key = `${isoYear}-${weekNum}`;
+    while (current <= endNormalized) {
+        const { weekNumber, year } = getISOWeekAndYear(current);
+        const key = `${year}-${weekNumber}`;
 
         if (!distinctWeeks.has(key)) {
             distinctWeeks.add(key);
+            const prev = existingByKey.get(key);
             weeks.push({
-                id: uuidv4(),
-                weekNumber: weekNum,
-                year: isoYear,
-                isBlocked: false,
-                weekType: 'A'
+                id: formatWeekId(year, weekNumber),
+                weekNumber,
+                year,
+                isBlocked: prev ? prev.isBlocked : false,
+                weekType: prev ? prev.weekType : 'A',
             });
         }
 
-        // Advance 1 week
         current.setDate(current.getDate() + 7);
     }
 

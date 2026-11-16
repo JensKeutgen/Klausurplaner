@@ -1,9 +1,11 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { DndContext, DragOverlay, useDroppable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
-import { type AppState, type DayOfWeek, DAYS_OF_WEEK, type Exam } from '../types';
+import { type AppState, type DayOfWeek, DAYS_OF_WEEK, DEFAULT_SOLVER_SETTINGS, type Exam } from '../types';
 import { ExamCard } from './ExamCard';
 import { clsx } from 'clsx';
-import { validateMove } from '../logic/solver';
+import { evaluateSchedule, getEffectiveGradeLevel, getTeachersForSubjectOnDay, validateMove } from '../logic/solver';
+import { formatShortDate, getWeekDateRangeString, getWeekDayDate } from '../logic/dateUtils';
+import { Ban, CheckCircle2, AlertTriangle, Users, Layers } from 'lucide-react';
 
 interface DroppableCellProps {
     id: string;
@@ -13,7 +15,6 @@ interface DroppableCellProps {
     isHighlight?: boolean;
 }
 
-// Helper component for a droppable cell
 function DroppableCell({
     id,
     children,
@@ -29,7 +30,7 @@ function DroppableCell({
     const bgStyle = isBlocked
         ? 'repeating-linear-gradient(45deg, var(--bg-app), var(--bg-app) 10px, var(--bg-panel) 10px, var(--bg-panel) 20px)'
         : isHighlight
-            ? 'rgba(34, 197, 94, 0.15)' // Green tint
+            ? 'rgba(34, 197, 94, 0.15)'
             : undefined;
 
     return (
@@ -44,13 +45,13 @@ function DroppableCell({
             style={{
                 width: '100%',
                 height: '100%',
-                minHeight: '60px',
+                minHeight: '64px',
                 padding: '4px',
                 background: bgStyle,
                 borderRight: '1px solid var(--border-color)',
                 borderBottom: '1px solid var(--border-color)',
-                opacity: isBlocked ? 0.5 : 1,
-                boxShadow: isHighlight ? 'inset 0 0 0 1px rgba(34, 197, 94, 0.3)' : 'none',
+                opacity: isBlocked ? 0.55 : 1,
+                boxShadow: isHighlight ? 'inset 0 0 0 1px rgba(34, 197, 94, 0.35)' : 'none',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '4px'
@@ -66,10 +67,41 @@ interface CalendarBoardProps {
     onMoveExam: (examId: string, weekId: string | null, day: DayOfWeek | null) => void;
     onTogglePin: (examId: string) => void;
     onToggleBlockClassDay?: (className: string, weekId: string, day: DayOfWeek) => void;
+    onToggleBlockGlobalDay?: (weekId: string, day: DayOfWeek) => void;
+    onToggleWeekType?: (weekId: string) => void;
 }
 
-export function CalendarBoard({ state, onMoveExam, onTogglePin, onToggleBlockClassDay }: CalendarBoardProps) {
+const GERMAN_DAY_SHORT: Record<DayOfWeek, string> = {
+    Monday: 'Mo',
+    Tuesday: 'Di',
+    Wednesday: 'Mi',
+    Thursday: 'Do',
+    Friday: 'Fr',
+};
+
+export function CalendarBoard({
+    state,
+    onMoveExam,
+    onTogglePin,
+    onToggleBlockClassDay,
+    onToggleBlockGlobalDay,
+    onToggleWeekType,
+}: CalendarBoardProps) {
     const [activeDraggable, setActiveDraggable] = React.useState<Exam | null>(null);
+    const solverSettings = state.solverSettings || DEFAULT_SOLVER_SETTINGS;
+
+    const evaluation = useMemo(
+        () =>
+            evaluateSchedule(
+                state.exams,
+                state.classes,
+                state.weeks,
+                state.blockedDays,
+                state.blockedClassDays,
+                solverSettings
+            ),
+        [state.exams, state.classes, state.weeks, state.blockedDays, state.blockedClassDays, solverSettings]
+    );
 
     const handleDragStart = (event: DragStartEvent) => {
         setActiveDraggable(event.active.data.current?.exam || null);
@@ -105,14 +137,69 @@ export function CalendarBoard({ state, onMoveExam, onTogglePin, onToggleBlockCla
         }
     };
 
-    // Calculate grid columns: 150px (Class) + (Weeks * 5) * 1fr
-    // Actually we want minmax for the days to ensure they don't get too small
     const totalDays = state.weeks.length * 5;
-    const gridTemplateColumns = `150px repeat(${totalDays}, minmax(60px, 1fr))`;
+    const gridTemplateColumns = `160px repeat(${totalDays}, minmax(76px, 1fr))`;
 
     return (
         <DndContext onDragStart={handleDragStart} onDragEnd={onDragEnd}>
-            <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', alignItems: 'start', height: 'calc(100vh - 200px)' }}>
+            {/* Solver Quality Bar */}
+            {state.exams.length > 0 && (
+                <div
+                    style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '1rem',
+                        alignItems: 'center',
+                        padding: '0.75rem 1rem',
+                        marginTop: '1rem',
+                        background: 'var(--bg-card)',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-color)',
+                        fontSize: '0.85rem',
+                    }}
+                >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}>
+                        <CheckCircle2
+                            size={16}
+                            color={evaluation.unassignedExams === 0 ? 'var(--accent-success)' : 'var(--accent-warning)'}
+                        />
+                        <span>
+                            Zugewiesen: {evaluation.assignedExams}/{evaluation.totalExams}
+                        </span>
+                    </div>
+
+                    {evaluation.sameWeekGroupTotal > 0 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-primary)' }}>
+                            <Layers size={15} color="var(--accent-primary)" />
+                            <span>
+                                Fach & Stufe in gleicher Woche: {evaluation.sameWeekGroupAligned}/{evaluation.sameWeekGroupTotal} ({evaluation.sameWeekGroupRate}%)
+                            </span>
+                        </div>
+                    )}
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: evaluation.consecutiveDayPairs > 0 ? 'var(--accent-warning)' : 'var(--text-secondary)' }}>
+                        <span>Nachbartage (Klasse): {evaluation.consecutiveDayPairs}</span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: evaluation.teacherConflicts > 0 ? 'var(--accent-warning)' : 'var(--text-secondary)' }}>
+                        <Users size={15} />
+                        <span>Lehrkraft-Überschneidungen: {evaluation.teacherConflicts}</span>
+                    </div>
+
+                    {evaluation.constraintViolations > 0 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--accent-danger)', fontWeight: 600 }}>
+                            <AlertTriangle size={15} />
+                            <span>Regelverstöße: {evaluation.constraintViolations}</span>
+                        </div>
+                    )}
+
+                    <div style={{ marginLeft: 'auto', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                        Tipp: Klick auf Datum im Kopf = Tag für alle Klassen sperren
+                    </div>
+                </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '0.75rem', alignItems: 'start', height: 'calc(100vh - 210px)' }}>
 
                 {/* Main Grid Container */}
                 <div className="card" style={{
@@ -121,16 +208,15 @@ export function CalendarBoard({ state, onMoveExam, onTogglePin, onToggleBlockCla
                     background: 'var(--bg-card)',
                     borderRadius: '8px',
                     height: '100%',
-                    position: 'relative' // For sticky headers
+                    position: 'relative'
                 }}>
                     <div style={{
                         display: 'grid',
                         gridTemplateColumns: gridTemplateColumns,
-                        // gridTemplateRows: 'auto auto repeat(auto-fill, minmax(60px, 1fr))', // Dynamic rows
-                        minWidth: 'fit-content' // Allow horizontal scroll if grid is too wide
+                        minWidth: 'fit-content'
                     }}>
 
-                        {/* --- Header Row 1: Weeks --- */}
+                        {/* --- Header Row 1 & 2 Corner: Klasse --- */}
                         <div style={{
                             position: 'sticky',
                             top: 0,
@@ -139,122 +225,208 @@ export function CalendarBoard({ state, onMoveExam, onTogglePin, onToggleBlockCla
                             background: 'var(--bg-card)',
                             borderBottom: '1px solid var(--border-color)',
                             borderRight: '1px solid var(--border-color)',
-                            padding: '1rem',
+                            padding: '0.85rem 1rem',
                             fontWeight: 'bold',
                             gridColumn: '1 / 2',
-                            gridRow: '1 / 3', // Span 2 rows (covering Day header row height)
+                            gridRow: '1 / 3',
                             alignContent: 'center'
                         }}>
-                            Klasse
+                            Klasse / Stufe
                         </div>
 
+                        {/* --- Header Row 1: Weeks with real date range & Wochen-ID --- */}
                         {state.weeks.map((week, index) => (
                             <div key={week.id} style={{
                                 gridColumn: `${2 + index * 5} / span 5`,
                                 gridRow: '1 / 2',
                                 textAlign: 'center',
-                                padding: '0.5rem',
+                                padding: '0.45rem 0.5rem',
                                 background: 'var(--bg-card)',
                                 borderBottom: '1px solid var(--border-color)',
                                 borderRight: '1px solid var(--border-color)',
                                 position: 'sticky',
                                 top: 0,
                                 zIndex: 10,
+                                height: '48px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '8px',
                                 color: week.isBlocked ? 'var(--accent-danger)' : 'inherit'
                             }}>
-                                KW {week.weekNumber}
+                                <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>
+                                    KW {week.weekNumber}
+                                </span>
+                                <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                    ({getWeekDateRangeString(week)})
+                                </span>
+                                <span
+                                    style={{
+                                        fontSize: '0.68rem',
+                                        fontFamily: 'monospace',
+                                        background: 'var(--bg-app)',
+                                        color: 'var(--text-secondary)',
+                                        padding: '1px 5px',
+                                        borderRadius: '4px',
+                                    }}
+                                    title="Eindeutige Wochen-ID"
+                                >
+                                    {week.id}
+                                </span>
+                                <button
+                                    onClick={() => onToggleWeekType?.(week.id)}
+                                    style={{
+                                        fontSize: '0.68rem',
+                                        padding: '1px 6px',
+                                        borderRadius: '4px',
+                                        border: 'none',
+                                        background: week.weekType === 'A' ? 'var(--accent-primary)' : '#8b5cf6',
+                                        color: 'white',
+                                        fontWeight: 600,
+                                    }}
+                                    title="Wochentyp umschalten (A/B)"
+                                >
+                                    {week.weekType}
+                                </button>
                             </div>
                         ))}
 
-                        {/* --- Header Row 2: Days --- */}
+                        {/* --- Header Row 2: Days with real DD.MM. + Global Block Toggle --- */}
                         {state.weeks.map((week) => (
-                            DAYS_OF_WEEK.map((day) => (
-                                <div key={`${week.id}-${day}`} style={{
-                                    textAlign: 'center',
-                                    fontSize: '0.75rem',
-                                    padding: '4px',
-                                    borderBottom: '1px solid var(--border-color)',
-                                    borderRight: '1px solid var(--border-color)',
-                                    background: 'var(--bg-card)',
-                                    position: 'sticky',
-                                    top: '36px', // Approx height of first header row. Caution: Magic number.
-                                    zIndex: 10,
-                                    opacity: 0.7
-                                }}>
-                                    {day === 'Tuesday' ? 'Di' : day === 'Wednesday' ? 'Mi' : day === 'Thursday' ? 'Do' : day.slice(0, 2)}
-                                </div>
-                            ))
+                            DAYS_OF_WEEK.map((day) => {
+                                const dayDate = getWeekDayDate(week, day);
+                                const isGlobalBlocked = !!state.blockedDays[week.id]?.[day] || week.isBlocked;
+                                return (
+                                    <div
+                                        key={`${week.id}-${day}`}
+                                        onClick={() => onToggleBlockGlobalDay?.(week.id, day)}
+                                        title={isGlobalBlocked ? 'Tag global entsperren' : 'Tag für alle Klassen sperren'}
+                                        style={{
+                                            textAlign: 'center',
+                                            fontSize: '0.74rem',
+                                            padding: '4px 2px',
+                                            borderBottom: '1px solid var(--border-color)',
+                                            borderRight: '1px solid var(--border-color)',
+                                            background: isGlobalBlocked ? 'rgba(239, 68, 68, 0.16)' : 'var(--bg-card)',
+                                            color: isGlobalBlocked ? 'var(--accent-danger)' : 'var(--text-secondary)',
+                                            position: 'sticky',
+                                            top: '48px',
+                                            zIndex: 10,
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            alignItems: 'center',
+                                            lineHeight: 1.2,
+                                        }}
+                                    >
+                                        <span style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '2px' }}>
+                                            {GERMAN_DAY_SHORT[day]}
+                                            {isGlobalBlocked && <Ban size={10} />}
+                                        </span>
+                                        <span style={{ fontSize: '0.68rem', opacity: 0.9 }}>
+                                            {formatShortDate(dayDate)}
+                                        </span>
+                                    </div>
+                                );
+                            })
                         ))}
 
                         {/* --- Data Rows --- */}
-                        {state.classes.map(cls => (
-                            <React.Fragment key={cls.className}>
-                                {/* Class Name Column */}
-                                <div style={{
-                                    position: 'sticky',
-                                    left: 0,
-                                    zIndex: 5,
-                                    background: 'var(--bg-panel)',
-                                    borderBottom: '1px solid var(--border-color)',
-                                    borderRight: '1px solid var(--border-color)',
-                                    padding: '1rem',
-                                    fontWeight: 600,
-                                    alignContent: 'center'
-                                }}>
-                                    {cls.className}
-                                </div>
-
-                                {/* Day Cells */}
-                                {state.weeks.map(week => (
-                                    DAYS_OF_WEEK.map(day => {
-                                        const cellExams = state.exams.filter(e =>
-                                            e.className === cls.className &&
-                                            e.assignedWeekId === week.id &&
-                                            e.assignedDay === day
-                                        );
-
-                                        const isBlocked =
-                                            !!state.blockedDays[week.id]?.[day] ||
-                                            week.isBlocked ||
-                                            !!state.blockedClassDays?.[cls.className]?.[week.id]?.[day];
-
-                                        // A/B Subject Check
-                                        const weekSubjects = (week.weekType === 'B' && cls.subjectsB)
-                                            ? cls.subjectsB[day] || []
-                                            : cls.subjects[day] || [];
-
-                                        const isHighlight =
-                                            !!activeDraggable &&
-                                            activeDraggable.className === cls.className &&
-                                            !isBlocked &&
-                                            weekSubjects.includes(activeDraggable.subject);
-
-                                        return (
-                                            <div key={`${cls.className}-${week.id}-${day}`} style={{ overflow: 'hidden' }}>
-                                                <DroppableCell
-                                                    id={getCellId(cls.className, week.id, day)}
-                                                    isBlocked={isBlocked}
-                                                    isHighlight={isHighlight}
-                                                    onClick={() => onToggleBlockClassDay?.(cls.className, week.id, day)}
-                                                >
-                                                    {cellExams.map(exam => {
-                                                        const check = validateMove(exam, week.id, day, state.exams, cls, state.weeks, state.blockedDays, state.blockedClassDays);
-                                                        return (
-                                                            <ExamCard
-                                                                key={exam.id}
-                                                                exam={exam}
-                                                                isValid={check.valid}
-                                                                onTogglePin={onTogglePin}
-                                                            />
-                                                        );
-                                                    })}
-                                                </DroppableCell>
+                        {state.classes.map(cls => {
+                            const grade = getEffectiveGradeLevel(cls, cls.className);
+                            return (
+                                <React.Fragment key={cls.className}>
+                                    {/* Class Name Column */}
+                                    <div style={{
+                                        position: 'sticky',
+                                        left: 0,
+                                        zIndex: 5,
+                                        background: 'var(--bg-panel)',
+                                        borderBottom: '1px solid var(--border-color)',
+                                        borderRight: '1px solid var(--border-color)',
+                                        padding: '0.75rem 1rem',
+                                        fontWeight: 600,
+                                        alignContent: 'center'
+                                    }}>
+                                        <div>{cls.className}</div>
+                                        {grade && (
+                                            <div style={{ fontSize: '0.7rem', fontWeight: 400, color: 'var(--text-secondary)' }}>
+                                                Stufe {grade}
                                             </div>
-                                        );
-                                    })
-                                ))}
-                            </React.Fragment>
-                        ))}
+                                        )}
+                                    </div>
+
+                                    {/* Day Cells */}
+                                    {state.weeks.map(week => (
+                                        DAYS_OF_WEEK.map(day => {
+                                            const cellExams = state.exams.filter(e =>
+                                                e.className === cls.className &&
+                                                e.assignedWeekId === week.id &&
+                                                e.assignedDay === day
+                                            );
+
+                                            const isBlocked =
+                                                !!state.blockedDays[week.id]?.[day] ||
+                                                week.isBlocked ||
+                                                !!state.blockedClassDays?.[cls.className]?.[week.id]?.[day];
+
+                                            const weekSubjects = (week.weekType === 'B' && cls.subjectsB)
+                                                ? cls.subjectsB[day] || []
+                                                : cls.subjects[day] || [];
+
+                                            const isHighlight =
+                                                !!activeDraggable &&
+                                                activeDraggable.className === cls.className &&
+                                                !isBlocked &&
+                                                weekSubjects.includes(activeDraggable.subject);
+
+                                            return (
+                                                <div key={`${cls.className}-${week.id}-${day}`} style={{ overflow: 'hidden' }}>
+                                                    <DroppableCell
+                                                        id={getCellId(cls.className, week.id, day)}
+                                                        isBlocked={isBlocked}
+                                                        isHighlight={isHighlight}
+                                                        onClick={() => onToggleBlockClassDay?.(cls.className, week.id, day)}
+                                                    >
+                                                        {cellExams.map(exam => {
+                                                            const check = validateMove(
+                                                                exam,
+                                                                week.id,
+                                                                day,
+                                                                state.exams,
+                                                                cls,
+                                                                state.weeks,
+                                                                state.blockedDays,
+                                                                state.blockedClassDays,
+                                                                solverSettings,
+                                                                state.classes
+                                                            );
+                                                            const teachers = getTeachersForSubjectOnDay(
+                                                                cls,
+                                                                exam.subject,
+                                                                day,
+                                                                week.weekType
+                                                            );
+                                                            return (
+                                                                <ExamCard
+                                                                    key={exam.id}
+                                                                    exam={exam}
+                                                                    isValid={check.valid}
+                                                                    validationReason={check.reason}
+                                                                    validationWarning={check.warning}
+                                                                    teachers={teachers}
+                                                                    onTogglePin={onTogglePin}
+                                                                />
+                                                            );
+                                                        })}
+                                                    </DroppableCell>
+                                                </div>
+                                            );
+                                        })
+                                    ))}
+                                </React.Fragment>
+                            );
+                        })}
 
                     </div>
                 </div>

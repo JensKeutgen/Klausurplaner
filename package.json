@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:local": "node scripts/dev-local.mjs",
+    "setup:edupage": "node scripts/setup-edupage.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

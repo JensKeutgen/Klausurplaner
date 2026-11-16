@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { BookOpen, CheckSquare, Square, ChevronUp, ChevronDown } from 'lucide-react';
 import type { ClassSchedule } from '../types';
+import { getEffectiveGradeLevel } from '../logic/solver';
 
 interface SubjectSelectionProps {
     classes: ClassSchedule[];
@@ -12,13 +13,13 @@ interface SubjectSelectionProps {
 
 export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection, isCollapsed, onToggle }: SubjectSelectionProps) {
 
-    // Extract all unique subjects per class
+    // Extract all unique subjects per class from both Week A and Week B
     const classSubjects = useMemo(() => {
         const map: Record<string, string[]> = {};
         for (const cls of classes) {
-            const unique = Array.from(new Set(
-                Object.values(cls.subjects).flat()
-            )).sort();
+            const subjectsA = Object.values(cls.subjects).flat();
+            const subjectsB = cls.subjectsB ? Object.values(cls.subjectsB).flat() : [];
+            const unique = Array.from(new Set([...subjectsA, ...subjectsB])).sort();
             map[cls.className] = unique;
         }
         return map;
@@ -28,12 +29,9 @@ export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection,
         const currentSelected = selectedSubjects[className] || [];
         const isSelected = currentSelected.includes(subject);
 
-        let newClassSelected;
-        if (isSelected) {
-            newClassSelected = currentSelected.filter(s => s !== subject);
-        } else {
-            newClassSelected = [...currentSelected, subject];
-        }
+        const newClassSelected = isSelected
+            ? currentSelected.filter(s => s !== subject)
+            : [...currentSelected, subject];
 
         onUpdateSelection({
             ...selectedSubjects,
@@ -46,13 +44,11 @@ export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection,
         const currentSelected = selectedSubjects[className] || [];
 
         if (currentSelected.length === allSubjects.length) {
-            // Unselect all
             onUpdateSelection({
                 ...selectedSubjects,
                 [className]: []
             });
         } else {
-            // Select all
             onUpdateSelection({
                 ...selectedSubjects,
                 [className]: allSubjects
@@ -85,14 +81,22 @@ export function SubjectSelection({ classes, selectedSubjects, onUpdateSelection,
                         {classes.map(cls => {
                             const allSubjects = classSubjects[cls.className] || [];
                             const selected = selectedSubjects[cls.className] || [];
-                            const isAllSelected = selected.length === allSubjects.length;
+                            const isAllSelected = allSubjects.length > 0 && selected.length === allSubjects.length;
+                            const grade = getEffectiveGradeLevel(cls, cls.className);
 
                             return (
                                 <div key={cls.className} style={{ background: 'var(--bg-panel)', padding: '1rem', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
                                     <div
                                         style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-color)' }}
                                     >
-                                        <span style={{ fontWeight: 600 }}>{cls.className}</span>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                            <span style={{ fontWeight: 600 }}>{cls.className}</span>
+                                            {grade && (
+                                                <span style={{ fontSize: '0.72rem', padding: '1px 6px', borderRadius: '4px', background: 'var(--bg-app)', color: 'var(--text-secondary)' }}>
+                                                    Stufe {grade}
+                                                </span>
+                                            )}
+                                        </div>
                                         <button
                                             onClick={(e) => { e.stopPropagation(); toggleClassAll(cls.className); }}
                                             style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', fontSize: '0.8rem', cursor: 'pointer' }}

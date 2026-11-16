@@ -4,26 +4,30 @@ export const DAYS_OF_WEEK: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thu
 
 export interface ClassSchedule {
   className: string;
+  gradeLevel?: string; // Stufe (e.g. "11", "BG25", "ITA24") - auto-inferred if omitted
   subjects: {
     [key in DayOfWeek]: string[]; // Array of subjects for that day (Week A default)
   };
   subjectsB?: {
     [key in DayOfWeek]: string[]; // Array of subjects for Week B
   };
+  // Optional teacher initials per day -> subject (populated by EduPage import)
+  subjectTeachers?: Partial<Record<DayOfWeek, Record<string, string[]>>>;
+  subjectTeachersB?: Partial<Record<DayOfWeek, Record<string, string[]>>>;
 }
 
 export interface Exam {
   id: string;
   className: string;
   subject: string;
-  durationMinutes: number; // Default 90?
+  durationMinutes: number; // Default 90
   isPinned: boolean;
   assignedWeekId: string | null;
   assignedDay: DayOfWeek | null;
 }
 
 export interface Week {
-  id: string;
+  id: string; // Deterministic Wochen-ID, e.g. "2026-KW45"
   weekNumber: number;
   year: number;
   isBlocked: boolean; // Entire week blocked
@@ -42,6 +46,29 @@ export interface PdfSettings {
   gradesDueDate: string;
 }
 
+export interface SolverSettings {
+  maxExamsPerWeek: number;
+  keepPinnedOnDistribute: boolean;
+  preferSameGradeSubjectSameWeek: boolean;
+  avoidConsecutiveDays: boolean;
+  avoidTeacherCollisions: boolean;
+}
+
+export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
+  maxExamsPerWeek: 2,
+  keepPinnedOnDistribute: true,
+  preferSameGradeSubjectSameWeek: true,
+  avoidConsecutiveDays: true,
+  avoidTeacherCollisions: true,
+};
+
+export interface EdupageMeta {
+  subdomain?: string;
+  username?: string;
+  lastSyncAt?: string;
+  selectedClassIds?: string[];
+}
+
 export interface AppState {
   classes: ClassSchedule[];
   weeks: Week[];
@@ -50,4 +77,6 @@ export interface AppState {
   blockedClassDays: BlockedClassDays;
   selectedSubjects: Record<string, string[]>;
   pdfSettings: PdfSettings;
+  solverSettings?: SolverSettings;
+  edupageMeta?: EdupageMeta;
 }
