@@ -8,4 +8,4 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "klausurplaner-review"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "bf602b7e-3715-4283-b32e-103027372964"
