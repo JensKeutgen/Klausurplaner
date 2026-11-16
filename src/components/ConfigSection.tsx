@@ -5,23 +5,18 @@ import {
     ChevronRight,
     FileText,
     Sliders,
-    RefreshCw,
     Ban,
-    CalendarCheck2,
     Sparkles,
 } from 'lucide-react';
 import type { BlockedDays, HolidayLabels, PdfSettings, SolverSettings, Week } from '../types';
 import {
-    applyWeekABPattern,
     getISOWeek,
     getWeekDateRangeString,
     getWeekDayDate,
     getWeeksBetween,
     isDateInRange,
     isSameDay,
-    type WeekABPatternMode,
 } from '../logic/dateUtils';
-import { GERMAN_STATES, type GermanStateCode } from '../logic/holidays';
 
 interface ConfigSectionProps {
     section?: 'period' | 'rules' | 'all';
@@ -30,12 +25,8 @@ interface ConfigSectionProps {
     blockedDays: BlockedDays;
     holidayLabels?: HolidayLabels;
     weekAParity?: 'odd' | 'even';
-    onUpdateWeekAParity?: (parity: 'odd' | 'even') => void;
-    onApplyStateHolidays?: (state: GermanStateCode) => void;
-    onSyncEdupageCalendar?: () => Promise<void>;
     edupageSyncLoading?: boolean;
     edupageSyncMessage?: string | null;
-    bridgeOnline?: boolean;
     pdfSettings: PdfSettings;
     onUpdatePdfSettings: (settings: PdfSettings) => void;
     solverSettings: SolverSettings;
@@ -49,12 +40,8 @@ export function ConfigSection({
     blockedDays,
     holidayLabels = {},
     weekAParity = 'odd',
-    onUpdateWeekAParity,
-    onApplyStateHolidays,
-    onSyncEdupageCalendar,
     edupageSyncLoading = false,
     edupageSyncMessage = null,
-    bridgeOnline = false,
     pdfSettings,
     onUpdatePdfSettings,
     solverSettings,
@@ -72,7 +59,6 @@ export function ConfigSection({
     const [selectionEnd, setSelectionEnd] = useState<Date | null>(() =>
         weeks.length > 0 ? getWeekDayDate(weeks[weeks.length - 1], 4) : null
     );
-    const [selectedState, setSelectedState] = useState<GermanStateCode>('NW');
 
     const updateWeeks = (start: Date, end: Date) => {
         const newWeeks = getWeeksBetween(start, end, weeks, { weekAParity });
@@ -113,12 +99,6 @@ export function ConfigSection({
 
     const toggleWeekType = (id: string) => {
         onUpdateWeeks(weeks.map((w) => (w.id === id ? { ...w, weekType: w.weekType === 'A' ? 'B' : 'A' } : w)));
-    };
-
-    const handlePattern = (mode: WeekABPatternMode) => {
-        if (mode === 'odd-A') onUpdateWeekAParity?.('odd');
-        if (mode === 'even-A') onUpdateWeekAParity?.('even');
-        onUpdateWeeks(applyWeekABPattern(weeks, mode));
     };
 
     const renderMonth = (offset: number) => {
@@ -293,88 +273,20 @@ export function ConfigSection({
                         </button>
                     </div>
 
-                    {/* Holiday + A/B Automation Bar */}
-                    <div
-                        style={{
-                            display: 'flex',
-                            flexWrap: 'wrap',
-                            gap: '0.6rem',
-                            alignItems: 'center',
-                            padding: '0.75rem',
-                            borderRadius: '10px',
-                            background: 'var(--bg-panel)',
-                            border: '1px solid var(--border-subtle)',
-                        }}
-                    >
-                        {bridgeOnline && onSyncEdupageCalendar && (
-                            <button
-                                type="button"
-                                className="ui-btn ui-btn-primary"
-                                onClick={onSyncEdupageCalendar}
-                                disabled={edupageSyncLoading || weeks.length === 0}
-                                title="Lädt schulfreie Tage/Ferien und A/B-Wochentypen direkt für den Zeitraum aus EduPage"
-                            >
-                                <RefreshCw size={14} />
-                                {edupageSyncLoading ? 'Synchronisiere EduPage...' : 'Ferien & A/B-Wochen aus EduPage holen'}
-                            </button>
-                        )}
-
-                        {onApplyStateHolidays && (
-                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                <select
-                                    className="ui-input"
-                                    style={{ width: 'auto', fontSize: '0.8rem', padding: '5px 8px' }}
-                                    value={selectedState}
-                                    onChange={(e) => setSelectedState(e.target.value as GermanStateCode)}
-                                    title="Bundesland für gesetzliche Feiertage"
-                                >
-                                    {GERMAN_STATES.map((st) => (
-                                        <option key={st.code} value={st.code}>
-                                            {st.label}
-                                        </option>
-                                    ))}
-                                </select>
-                                <button
-                                    type="button"
-                                    className="ui-btn"
-                                    onClick={() => onApplyStateHolidays(selectedState)}
-                                    disabled={weeks.length === 0}
-                                >
-                                    <CalendarCheck2 size={14} />
-                                    Feiertage sperren
-                                </button>
-                            </div>
-                        )}
-
-                        <div style={{ marginLeft: 'auto', display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
-                            <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginRight: '4px' }}>A/B-Muster:</span>
-                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('odd-A')}>
-                                Ungerade KW = A
-                            </button>
-                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('even-A')}>
-                                Gerade KW = A
-                            </button>
-                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('alternate-start-A')}>
-                                Abwechselnd
-                            </button>
-                            <button type="button" className="ui-btn" style={{ padding: '4px 8px', fontSize: '0.76rem' }} onClick={() => handlePattern('flip')}>
-                                Tauschen
-                            </button>
-                        </div>
-                    </div>
-
-                    {edupageSyncMessage && (
+                    {(edupageSyncLoading || edupageSyncMessage) && (
                         <div
                             style={{
                                 fontSize: '0.82rem',
                                 padding: '0.55rem 0.85rem',
                                 borderRadius: '8px',
-                                background: 'var(--accent-success-soft)',
+                                background: edupageSyncLoading ? 'var(--accent-soft)' : 'var(--accent-success-soft)',
                                 color: 'var(--text-primary)',
-                                border: '1px solid var(--accent-success)',
+                                border: `1px solid ${edupageSyncLoading ? 'var(--accent-primary)' : 'var(--accent-success)'}`,
                             }}
                         >
-                            {edupageSyncMessage}
+                            {edupageSyncLoading
+                                ? 'Rufe Ferien, schulfreie Tage & A/B-Wochen automatisch aus EduPage ab...'
+                                : edupageSyncMessage}
                         </div>
                     )}
 

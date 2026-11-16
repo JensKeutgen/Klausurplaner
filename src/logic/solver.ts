@@ -42,23 +42,49 @@ const GERMAN_DAY_FULL: Record<DayOfWeek, string> = {
 
 /**
  * Infers the grade level ("Stufe") from a class name, e.g.:
- * "10A" -> "10", "11b" -> "11", "BG25a" -> "BG25", "ITA24-1" -> "ITA24", "Q1b" -> "Q1"
+ * "10A" -> "10", "11b" -> "11", "BG25a" -> "BG25", "ITA24-1" -> "ITA24",
+ * "AIT11" / "AIT12" / "AIT 12" -> "AIT1", "AIT21" -> "AIT2", "Q1b" -> "Q1"
  */
 export function inferGradeLevel(className: string): string {
-    const trimmed = className.trim();
+    const trimmed = className.trim().replace(/\s+/g, ' ');
     if (!trimmed) return '';
 
-    const numericMatch = trimmed.match(/^(\d{1,2})([A-Za-z_-].*)?$/);
+    // 1. Numeric-leading grades: "10A", "11b", "10-1", "10"
+    const numericMatch = trimmed.match(/^(\d{1,2})(?:[^0-9].*)?$/);
     if (numericMatch) {
         return numericMatch[1];
     }
 
-    const cohortMatch = trimmed.match(/^([A-Za-zÄÖÜäöüß]+\s*\d{1,4})(?:[-_ /.]*[A-Za-z0-9]+)?$/);
-    if (cohortMatch) {
-        const stripped = trimmed.replace(/(?:[-_ /.]+[A-Za-z0-9]+|[A-Za-z])$/, '');
-        if (stripped && stripped.length >= 2) {
-            return stripped;
+    // 2. Prefix + digits + explicit parallel suffix: "BG25a", "ITA24-1", "Q1b", "AIT 11-1"
+    const explicitSuffixMatch = trimmed.match(
+        /^([A-Za-zÄÖÜäöüß]+)[- _/.]?(\d{1,4})(?:[-_ /.]+[A-Za-z0-9]+|[A-Za-z]+)$/
+    );
+    if (explicitSuffixMatch) {
+        return `${explicitSuffixMatch[1]}${explicitSuffixMatch[2]}`;
+    }
+
+    // 3. Berufskolleg <Abteilung><Stufe><Klasse>, e.g. "AIT11"/"AIT12" -> "AIT1", "AIT21" -> "AIT2"
+    // Keep 24..29 intact when there is no suffix (calendar entry years like BG25 vs BG26).
+    const twoDigitTrackMatch = trimmed.match(/^([A-Za-zÄÖÜäöüß]+)[- _/.]?(\d)(\d)$/);
+    if (twoDigitTrackMatch) {
+        const [, prefix, d1, d2] = twoDigitTrackMatch;
+        const isCalendarYear = d1 === '2' && Number(d2) >= 4;
+        if (!isCalendarYear && Number(d1) >= 1 && Number(d1) <= 4) {
+            return `${prefix}${d1}`;
         }
+        return `${prefix}${d1}${d2}`;
+    }
+
+    // 4. Prefix + single digit: "AIT 1", "AIT2" -> "AIT1", "AIT2"
+    const singleDigitMatch = trimmed.match(/^([A-Za-zÄÖÜäöüß]+)[- _/.]?(\d)$/);
+    if (singleDigitMatch) {
+        return `${singleDigitMatch[1]}${singleDigitMatch[2]}`;
+    }
+
+    // Fallback: strip only a trailing letter or separator suffix if digits remain before it
+    const fallback = trimmed.replace(/(?:[-_ /.]+[A-Za-z]+|[A-Za-z])$/, '');
+    if (fallback && /\d/.test(fallback) && fallback.length >= 2) {
+        return fallback;
     }
 
     return trimmed;

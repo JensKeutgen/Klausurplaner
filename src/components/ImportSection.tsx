@@ -28,6 +28,7 @@ interface EdupageClassInfo {
 
 interface ImportSectionProps {
     onImport: (schedules: ClassSchedule[], meta?: EdupageMeta) => void;
+    onLoginStateChange?: (loggedIn: boolean) => void;
     edupageMeta?: EdupageMeta;
     bridgeOnline: boolean;
     edupageApiAvailable: boolean;
@@ -43,6 +44,7 @@ function getKWLabel(isoDate: string): string {
 
 export function ImportSection({
     onImport,
+    onLoginStateChange,
     edupageMeta,
     bridgeOnline,
     edupageApiAvailable,
@@ -103,6 +105,7 @@ export function ImportSection({
                 if (data.loggedIn && Array.isArray(data.classes)) {
                     setLoggedIn(true);
                     setEdupageClasses(data.classes);
+                    onLoginStateChange?.(true);
                 }
             })
             .catch(() => {
@@ -111,7 +114,7 @@ export function ImportSection({
         return () => {
             cancelled = true;
         };
-    }, [bridgeOnline]);
+    }, [bridgeOnline, onLoginStateChange]);
 
     const availableGrades = useMemo(() => {
         const set = new Set<string>();
@@ -192,6 +195,7 @@ export function ImportSection({
             setNeeds2FA(false);
             setLoggedIn(true);
             setEdupageClasses(data.classes || []);
+            onLoginStateChange?.(true);
             if (rememberCredentials && password) {
                 setHasSavedPassword(true);
             }
@@ -224,6 +228,7 @@ export function ImportSection({
             setTwoFaCode('');
             setLoggedIn(true);
             setEdupageClasses(data.classes || []);
+            onLoginStateChange?.(true);
             setEdupageStatus(`2FA bestätigt (${(data.classes || []).length} Klassen geladen).`);
         } catch (err: unknown) {
             setEdupageError(err instanceof Error ? err.message : '2FA fehlgeschlagen.');
@@ -253,6 +258,7 @@ export function ImportSection({
             setTwoFaCode('');
             setLoggedIn(true);
             setEdupageClasses(data.classes || []);
+            onLoginStateChange?.(true);
             setEdupageStatus(`2FA bestätigt (${(data.classes || []).length} Klassen geladen).`);
         } catch (err: unknown) {
             setEdupageError(err instanceof Error ? err.message : '2FA fehlgeschlagen.');
@@ -272,6 +278,7 @@ export function ImportSection({
             // ignore
         }
         setLoggedIn(false);
+        onLoginStateChange?.(false);
         setNeeds2FA(false);
         setEdupageClasses([]);
         setEdupageStatus(null);
@@ -720,7 +727,10 @@ export function ImportSection({
                                 </label>
                             </div>
 
-                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem' }}>
+                                <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                                    Ferien, schulfreie Tage & A/B-Wochen werden für den Klausurzeitraum automatisch mit abgerufen.
+                                </span>
                                 <button
                                     type="button"
                                     onClick={handleFetchTimetables}

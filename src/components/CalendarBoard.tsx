@@ -139,10 +139,9 @@ export function CalendarBoard({
     const solverSettings = state.solverSettings || DEFAULT_SOLVER_SETTINGS;
     const timing: TimingPreferences = useMemo(
         () => ({
-            global: state.subjectTiming,
             byClass: state.classSubjectTiming,
         }),
-        [state.subjectTiming, state.classSubjectTiming]
+        [state.classSubjectTiming]
     );
 
     const evaluation = useMemo(

@@ -18,6 +18,8 @@ export interface ClassSchedule {
   subjectTeachersB?: Partial<Record<DayOfWeek, Record<string, string[]>>>;
   // Optional selected exam teacher per subject when multiple teachers teach the same subject
   examTeacherBySubject?: Record<string, string>;
+  // Optional mapping teacher short/label -> full name (e.g. "WAE" -> "Frank Wächter")
+  teacherNames?: Record<string, string>;
 }
 
 export interface Exam {

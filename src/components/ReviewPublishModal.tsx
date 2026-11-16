@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { AppState, ReviewSyncMeta } from '../types';
 import {
   buildReviewShareUrl,
@@ -8,7 +8,8 @@ import {
   publishReviewPlan,
   setReviewPlanStatus,
 } from '../logic/reviewClient';
-import { Check, Copy, Globe, Lock, Mail, RefreshCw, Share2, X } from 'lucide-react';
+import { collectEmailRecipients, DEFAULT_EMAIL_DOMAIN } from '../logic/emailTemplate';
+import { Check, Copy, ExternalLink, Globe, Lock, Mail, RefreshCw, Share2, Users, X } from 'lucide-react';
 
 interface ReviewPublishModalProps {
   isOpen: boolean;
@@ -35,7 +36,20 @@ export function ReviewPublishModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [copiedType, setCopiedType] = useState<'link' | 'mail' | null>(null);
+  const [copiedType, setCopiedType] = useState<'link' | 'mail' | 'addresses' | null>(null);
+
+  const recipients = useMemo(
+    () => collectEmailRecipients(appState, DEFAULT_EMAIL_DOMAIN),
+    [appState]
+  );
+  const recipientListSemicolon = useMemo(
+    () => recipients.map((r) => r.email).join('; '),
+    [recipients]
+  );
+  const recipientListComma = useMemo(
+    () => recipients.map((r) => r.email).join(', '),
+    [recipients]
+  );
 
   if (!isOpen) return null;
 
@@ -126,9 +140,9 @@ export function ReviewPublishModal({
     setTimeout(() => setCopiedType(null), 2000);
   };
 
-  const handleCopyMailTemplate = async () => {
-    if (!shareUrl) return;
-    const text = `Liebe Kolleginnen und Kollegen,
+  const mailSubject = `Klausurplanung zur Prüfung: ${appState.pdfSettings.title || 'Klausurplanung'}`;
+  const mailTemplateText = shareUrl
+    ? `Liebe Kolleginnen und Kollegen,
 
 der Entwurf für "${appState.pdfSettings.title || 'Klausurplanung'}" ist fertig.
 Bitte schaut kurz drüber und klickt unter folgendem Link an, ob eure Klausuren passen oder ob es Sperrtermine/Wünsche gibt:
@@ -142,9 +156,26 @@ Kurze Anleitung:
 3. Falls nötig im Kalender Tage markieren, die auf keinen Fall gehen
 4. „Rückmeldung absenden“ klicken
 
-Vielen Dank!`;
-    await navigator.clipboard.writeText(text);
+Vielen Dank!`
+    : '';
+
+  const mailtoHref = shareUrl
+    ? `mailto:?bcc=${encodeURIComponent(recipientListComma)}&subject=${encodeURIComponent(
+        mailSubject
+      )}&body=${encodeURIComponent(mailTemplateText)}`
+    : '#';
+
+  const handleCopyMailTemplate = async () => {
+    if (!mailTemplateText) return;
+    await navigator.clipboard.writeText(mailTemplateText);
     setCopiedType('mail');
+    setTimeout(() => setCopiedType(null), 2500);
+  };
+
+  const handleCopyAddresses = async () => {
+    if (!recipientListSemicolon) return;
+    await navigator.clipboard.writeText(recipientListSemicolon);
+    setCopiedType('addresses');
     setTimeout(() => setCopiedType(null), 2500);
   };
 
@@ -343,29 +374,129 @@ Vielen Dank!`;
               </button>
             </div>
 
-            <button
-              type="button"
-              onClick={handleCopyMailTemplate}
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={handleCopyMailTemplate}
+                style={{
+                  flex: 1,
+                  minWidth: '210px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  padding: '0.55rem 0.85rem',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border-color)',
+                  background: 'var(--bg-app)',
+                  color: 'var(--text-primary)',
+                  fontWeight: 600,
+                  fontSize: '0.83rem',
+                }}
+              >
+                {copiedType === 'mail' ? <Check size={14} color="var(--accent-success)" /> : <Mail size={14} />}
+                {copiedType === 'mail'
+                  ? 'E-Mail-Text in Zwischenablage kopiert ✓'
+                  : 'Fertige E-Mail-Vorlage für Kollegen kopieren'}
+              </button>
+
+              <a
+                href={mailtoHref}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  padding: '0.55rem 0.85rem',
+                  borderRadius: '6px',
+                  border: 'none',
+                  background: 'var(--accent-primary)',
+                  color: 'white',
+                  fontWeight: 600,
+                  fontSize: '0.83rem',
+                  textDecoration: 'none',
+                }}
+              >
+                <ExternalLink size={14} />
+                Im Mailprogramm öffnen
+              </a>
+            </div>
+
+            {/* Automatische @bk-tm.de Empfängerliste */}
+            <div
               style={{
-                width: '100%',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '6px',
-                padding: '0.55rem 0.85rem',
-                borderRadius: '6px',
+                marginTop: '0.75rem',
+                padding: '0.75rem',
+                borderRadius: '8px',
                 border: '1px solid var(--border-color)',
                 background: 'var(--bg-app)',
-                color: 'var(--text-primary)',
-                fontWeight: 600,
-                fontSize: '0.83rem',
               }}
             >
-              {copiedType === 'mail' ? <Check size={14} color="var(--accent-success)" /> : <Mail size={14} />}
-              {copiedType === 'mail'
-                ? 'E-Mail-Text in Zwischenablage kopiert ✓'
-                : 'Fertige E-Mail-Vorlage für Kollegen kopieren'}
-            </button>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  marginBottom: '0.45rem',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '0.8rem',
+                    fontWeight: 700,
+                  }}
+                >
+                  <Users size={14} color="var(--accent-primary)" />
+                  E-Mail-Adressen ({recipients.length})
+                </span>
+                <button
+                  type="button"
+                  disabled={!recipientListSemicolon}
+                  onClick={handleCopyAddresses}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '0.35rem 0.7rem',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border-color)',
+                    background: 'var(--bg-panel)',
+                    color: 'var(--text-primary)',
+                    fontWeight: 600,
+                    fontSize: '0.78rem',
+                  }}
+                >
+                  {copiedType === 'addresses' ? (
+                    <Check size={13} color="var(--accent-success)" />
+                  ) : (
+                    <Copy size={13} />
+                  )}
+                  {copiedType === 'addresses' ? 'Adressen kopiert ✓' : 'Adressen kopieren'}
+                </button>
+              </div>
+              <input
+                type="text"
+                readOnly
+                value={recipientListSemicolon}
+                onClick={(e) => (e.target as HTMLInputElement).select()}
+                placeholder="Keine Lehrkräfte in ausgewählten Klausuren gefunden"
+                style={{
+                  width: '100%',
+                  padding: '0.45rem 0.65rem',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border-color)',
+                  background: 'var(--bg-panel)',
+                  color: 'var(--text-secondary)',
+                  fontSize: '0.78rem',
+                  fontFamily: 'monospace',
+                }}
+              />
+            </div>
 
             {reviewSync.lastPublishedAt && (
               <div style={{ marginTop: '0.6rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>

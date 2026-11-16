@@ -67,24 +67,41 @@ DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
 
 def _infer_grade_level(class_name: str, api_grade: Any = None) -> str:
+    trimmed = re.sub(r"\s+", " ", class_name.strip())
+    if trimmed:
+        # 1. Numeric-leading grades: "10A", "11b", "10-1", "10"
+        m_num = re.match(r"^(\d{1,2})(?:[^0-9].*)?$", trimmed)
+        if m_num:
+            return m_num.group(1)
+
+        # 2. Prefix + digits + explicit parallel suffix: "BG25a", "ITA24-1", "Q1b"
+        m_suffix = re.match(
+            r"^([A-Za-zÄÖÜäöüß]+)[- _/.]?(\d{1,4})(?:[-_ /.]+[A-Za-z0-9]+|[A-Za-z]+)$",
+            trimmed,
+        )
+        if m_suffix:
+            return f"{m_suffix.group(1)}{m_suffix.group(2)}"
+
+        # 3. Berufskolleg <Abteilung><Stufe><Klasse>, e.g. "AIT11"/"AIT12" -> "AIT1", "AIT21" -> "AIT2"
+        m_track = re.match(r"^([A-Za-zÄÖÜäöüß]+)[- _/.]?(\d)(\d)$", trimmed)
+        if m_track:
+            prefix, d1, d2 = m_track.group(1), m_track.group(2), m_track.group(3)
+            is_calendar_year = d1 == "2" and int(d2) >= 4
+            if not is_calendar_year and 1 <= int(d1) <= 4:
+                return f"{prefix}{d1}"
+            return f"{prefix}{d1}{d2}"
+
+        # 4. Prefix + single digit: "AIT 1", "AIT2" -> "AIT1", "AIT2"
+        m_single = re.match(r"^([A-Za-zÄÖÜäöüß]+)[- _/.]?(\d)$", trimmed)
+        if m_single:
+            return f"{m_single.group(1)}{m_single.group(2)}"
+
     if api_grade is not None and str(api_grade).strip():
-        g = str(api_grade).strip()
-        # Keep coherent prefix if class_name has cohort code like BG25a
-        m_cohort = re.match(r"^([A-Za-zÄÖÜäöüß]+\s*\d{1,4})(?:[-_ /.]*[A-Za-z0-9]+)?$", class_name.strip())
-        if m_cohort:
-            stripped = re.sub(r"(?:[-_ /.]+[A-Za-z0-9]+|[A-Za-z])$", "", class_name.strip())
-            if stripped and len(stripped) >= 2:
-                return stripped
-        return g
+        return str(api_grade).strip()
 
-    trimmed = class_name.strip()
-    m_num = re.match(r"^(\d{1,2})([A-Za-z_-].*)?$", trimmed)
-    if m_num:
-        return m_num.group(1)
-
-    stripped = re.sub(r"(?:[-_ /.]+[A-Za-z0-9]+|[A-Za-z])$", "", trimmed)
-    if stripped and len(stripped) >= 2:
-        return stripped
+    fallback = re.sub(r"(?:[-_ /.]+[A-Za-z]+|[A-Za-z])$", "", trimmed)
+    if fallback and re.search(r"\d", fallback) and len(fallback) >= 2:
+        return fallback
     return trimmed
 
 
@@ -152,7 +169,7 @@ def _extract_subject_label(lesson: Any, use_short: bool) -> str | None:
     return str(label).strip()
 
 
-def _extract_teachers(lesson: Any) -> list[str]:
+def _extract_teachers(lesson: Any, full_names_out: dict[str, str] | None = None) -> list[str]:
     teachers = getattr(lesson, "teachers", None)
     if teachers is None:
         single = getattr(lesson, "teacher", None)
@@ -161,11 +178,14 @@ def _extract_teachers(lesson: Any) -> list[str]:
     for t in teachers:
         if t is None:
             continue
-        short_t = getattr(t, "short", None)
-        name_t = getattr(t, "name", None)
-        label = (short_t or name_t or "").strip()
-        if label and label not in names:
-            names.append(label)
+        short_t = (getattr(t, "short", None) or "").strip()
+        name_t = (getattr(t, "name", None) or "").strip()
+        label = short_t or name_t
+        if label:
+            if label not in names:
+                names.append(label)
+            if full_names_out is not None and name_t:
+                full_names_out[label] = name_t
     return names
 
 
@@ -174,9 +194,10 @@ def _fetch_week_schedule(
     cls_obj: Any,
     monday_date: datetime.date,
     use_short_subjects: bool,
-) -> tuple[dict[str, list[str]], dict[str, dict[str, list[str]]]]:
+) -> tuple[dict[str, list[str]], dict[str, dict[str, list[str]]], dict[str, str]]:
     subjects_by_day: dict[str, list[str]] = {d: [] for d in DAY_NAMES}
     teachers_by_day: dict[str, dict[str, list[str]]] = {}
+    teacher_full_names: dict[str, str] = {}
 
     for idx, day_name in enumerate(DAY_NAMES):
         day_date = monday_date + datetime.timedelta(days=idx)
@@ -204,7 +225,7 @@ def _fetch_week_schedule(
             if not subj_label:
                 continue
             day_subjects.append(subj_label)
-            t_list = _extract_teachers(lesson)
+            t_list = _extract_teachers(lesson, teacher_full_names)
             if t_list:
                 existing_t = day_teachers.setdefault(subj_label, [])
                 for t in t_list:
@@ -215,7 +236,7 @@ def _fetch_week_schedule(
         if day_teachers:
             teachers_by_day[day_name] = day_teachers
 
-    return subjects_by_day, teachers_by_day
+    return subjects_by_day, teachers_by_day, teacher_full_names
 
 
 def _monday_of_date(date_str: str) -> datetime.date:
@@ -371,16 +392,24 @@ def _sync_calendar_from_edupage(
         if isinstance(s, dict) and s.get("className"):
             ref_by_name[str(s["className"])] = s
 
-    # Pick up to 3 reference classes (prefer ones that also have A/B schedules in state)
+    # Pick up to 5 reference classes diversified across grade levels (preferring imported classes)
     ordered_objs: list[Any] = []
+    seen_grades: set[str] = set()
+    preferred_objs: list[Any] = []
     for cls_obj in class_objs:
         cname = str(getattr(cls_obj, "name", getattr(cls_obj, "short", "")))
         if cname in ref_by_name:
+            preferred_objs.append(cls_obj)
+    for cls_obj in preferred_objs + [c for c in class_objs if c not in preferred_objs]:
+        cname = str(getattr(cls_obj, "name", getattr(cls_obj, "short", "")))
+        g = _infer_grade_level(cname, getattr(cls_obj, "grade", None))
+        if g not in seen_grades:
+            seen_grades.add(g)
             ordered_objs.append(cls_obj)
-    for cls_obj in class_objs:
+    for cls_obj in preferred_objs + class_objs:
         if cls_obj not in ordered_objs:
             ordered_objs.append(cls_obj)
-    sampled_objs = ordered_objs[:3]
+    sampled_objs = ordered_objs[:5]
 
     parsed_weeks: list[tuple[str, datetime.date, datetime.date]] = []
     for w in weeks_payload:
@@ -454,7 +483,11 @@ def _sync_calendar_from_edupage(
                     else None
                 ) or it.get("name")
                 if isinstance(ev_name, str) and ev_name.strip():
-                    if re.search(r"ferien|feiertag|frei|holiday|bewegl|ausfall|unterrichtsfrei", ev_name, re.I):
+                    if re.search(
+                        r"ferien|feiertag|frei|holiday|bewegl|ausfall|unterrichtsfrei|pädagog|studien|konferenz|brückentag",
+                        ev_name,
+                        re.I,
+                    ):
                         event_label_by_date[d_iso] = ev_name.strip()[:48]
 
             if is_cancelled or is_event:
@@ -483,7 +516,11 @@ def _sync_calendar_from_edupage(
                     for lesson in lessons:
                         if getattr(lesson, "is_cancelled", False) or getattr(lesson, "is_event", False):
                             cur_txt = str(getattr(lesson, "curriculum", "") or "")
-                            if cur_txt and re.search(r"ferien|feiertag|frei|holiday", cur_txt, re.I):
+                            if cur_txt and re.search(
+                                r"ferien|feiertag|frei|holiday|bewegl|ausfall|unterrichtsfrei|pädagog|studien|konferenz|brückentag",
+                                cur_txt,
+                                re.I,
+                            ):
                                 event_label_by_date.setdefault(d_iso, cur_txt[:48])
                             continue
                         lbl = _extract_subject_label(lesson, use_short)
@@ -513,7 +550,7 @@ def _sync_calendar_from_edupage(
             explicit_label = timeline_labels.get(d_iso) or event_label_by_date.get(d_iso)
 
             # Treat as holiday/free day if explicitly marked OR no regular lessons while surrounding term has lessons
-            if explicit_label or (active_school_days >= 3 and reg_cnt == 0):
+            if explicit_label or (active_school_days >= 2 and reg_cnt == 0):
                 blocked_days.setdefault(wid, {})[day_name] = True
                 holiday_labels.setdefault(wid, {})[day_name] = explicit_label or "Schulfrei / Ferien"
                 detected_holiday_count += 1
@@ -931,7 +968,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             cname = str(getattr(cls_obj, "name", getattr(cls_obj, "short", "Unbekannt")))
             grade = getattr(cls_obj, "grade", None)
             try:
-                subj_a, teachers_a = _fetch_week_schedule(edupage, cls_obj, monday_a, use_short)
+                subj_a, teachers_a, names_a = _fetch_week_schedule(edupage, cls_obj, monday_a, use_short)
                 entry: dict[str, Any] = {
                     "className": cname,
                     "gradeLevel": _infer_grade_level(cname, grade),
@@ -939,13 +976,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 }
                 if teachers_a:
                     entry["subjectTeachers"] = teachers_a
+                merged_names = dict(names_a)
 
                 if monday_b is not None:
-                    subj_b, teachers_b = _fetch_week_schedule(edupage, cls_obj, monday_b, use_short)
+                    subj_b, teachers_b, names_b = _fetch_week_schedule(edupage, cls_obj, monday_b, use_short)
+                    merged_names.update(names_b)
                     if subj_b != subj_a:
                         entry["subjectsB"] = subj_b
                         if teachers_b:
                             entry["subjectTeachersB"] = teachers_b
+                if merged_names:
+                    entry["teacherNames"] = merged_names
 
                 schedules.append(entry)
             except Exception as exc:
